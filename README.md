@@ -1,7 +1,5 @@
 # TETRIN
 Fan-Made Tetris game
-# TETRIN
-
 ブラウザで遊べるオリジナルテトリスゲームです。
 
 ## 特徴
