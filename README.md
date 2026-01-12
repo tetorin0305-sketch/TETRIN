@@ -29,7 +29,7 @@ HOLDシステムと「次の5個」を見通す戦略が特徴です
 
 ## 💻 プレイ方法 / How to Play
 ブラウザでこちらを開くだけで遊べます  
-[Play TETRIN](https://ユーザー名.github.io/TETRIN/)
+[Play TETRIN](https://tetorin0305-sketch.github.io/TETRIN/)
 
 ---
 
