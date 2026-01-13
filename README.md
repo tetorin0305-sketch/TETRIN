@@ -1,9 +1,9 @@
 # TETRIN 🎮
 
 ブラウザで遊べるオリジナルテトリスゲーム  
-HOLDシステムと「次の5個」を見通す戦略が特徴です
+HOLDシステムと「5個のNEXT」を見通す戦略が特徴です
 
-![TETRIN Gameplay](https://ユーザー名.github.io/TETRIN/assets/gameplay.gif)  <!-- GIFプレイ画面 -->
+![TETRIN Gameplay](https://ユーザー名.github.io/TETRIN/assets/gameplay.gif) 
 
 ---
 
@@ -12,7 +12,7 @@ HOLDシステムと「次の5個」を見通す戦略が特徴です
 - **3つのモード / 3 Game Modes**:
   - **マラソン / Marathon**：長時間プレイでハイスコアを目指す
   - **40ライン / 40 Lines**：40ライン消去までのタイムアタック
-  - **4列REN / 4-Column REN**：4列消しでRENを維持し続ける
+  - **無限4列REN / 4-Column REN**：4列消しでRENを維持し続ける
 - **シンプル操作 / Easy Controls**：すぐ遊べる設計
 
 ---
@@ -25,6 +25,7 @@ HOLDシステムと「次の5個」を見通す戦略が特徴です
 | 下に落とす / Soft Drop | ↓     |
 | HOLD             | C         |
 
+ゲームパッド/JoyCon 対応可能！
 ---
 
 ## 💻 プレイ方法 / How to Play
