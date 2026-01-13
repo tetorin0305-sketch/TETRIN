@@ -73,15 +73,17 @@ const TETROMINO_TYPES = Object.keys(TETROMINOS);
 // ゲーム定数
 // ========================================
 const BOARD_WIDTH = 10;
-const BOARD_HEIGHT = 20;
+const BOARD_HEIGHT = 40; // 20 -> 40 (上部20段はバッファゾーン)
+const VISIBLE_HEIGHT = 20; // 画面に見える高さ
 const BLOCK_SIZE = 30;
 const INITIAL_SPEED = 1000; // 1秒
-const SPEED_DECREASE = 100; // レベルアップごとの速度増加 (減少幅を大きく)
+const SPEED_DECREASE_RATE = 0.7; // レベルアップごとの速度倍率 (指数関数的減衰)
 const LOCK_DELAY_TIME = 500; // 接地猶予時間 (ms)
-const MAX_LOCK_RESET = 15; // 接地猶予をリセットできる最大回数
+const MAX_LOCK_RESET = 15; // 設置回避を防止するための通算リセット制限回数 (ピース1個あたり)
 const DAS_DELAY = 300;     // 長押しと認識するまでの時間 (ms)
 const ARR_INTERVAL = 20;   // 連続移動の間隔 (ms)
-const SOFT_DROP_INTERVAL = 30; // ソフトドロップ時の間隔 (ms)
+const SOFT_DROP_INTERVAL = 20; // ソフトドロップ時の間隔 (ms)
+const DISPLAY_OFFSET = 6; // 0.2段分 (30 * 0.2) のチラ見せオフセット
 
 // ========================================
 // SRS (Super Rotation System) キックデータ
@@ -123,31 +125,50 @@ class KeyBindings {
             rotateRight: 'ArrowUp',
             rotateLeft: 'KeyZ',
             hold: 'KeyC',
+            hold2: 'ShiftLeft',
             pause: 'KeyP',
             reset: 'KeyR'
+        };
+        this.defaultGamepadBindings = {
+            moveLeft: 14,    // D-Pad Left
+            moveRight: 15,   // D-Pad Right
+            softDrop: 13,    // D-Pad Down (画像準拠)
+            hardDrop: 12,    // D-Pad Up (画像準拠)
+            rotateRight: 1,  // B Button (画像準拠)
+            rotateLeft: 0,   // A Button (画像準拠)
+            hold: 4,         // L1 Button (画像準拠)
+            hold2: 5,        // R1 Button (画像準拠)
+            pause: 7,        // R2 Button (画像準拠)
+            reset: 9         // START (画像準拠)
         };
         this.loadBindings();
     }
 
     loadBindings() {
         try {
-            const saved = localStorage.getItem('tetrisKeyBindings');
-            this.bindings = saved ? { ...this.defaultBindings, ...JSON.parse(saved) } : { ...this.defaultBindings };
+            const savedKeys = localStorage.getItem('tetrisKeyBindings');
+            this.bindings = savedKeys ? { ...this.defaultBindings, ...JSON.parse(savedKeys) } : { ...this.defaultBindings };
+
+            const savedGp = localStorage.getItem('tetrisGamepadBindings');
+            this.gamepadBindings = savedGp ? { ...this.defaultGamepadBindings, ...JSON.parse(savedGp) } : { ...this.defaultGamepadBindings };
         } catch (e) {
             this.bindings = { ...this.defaultBindings };
+            this.gamepadBindings = { ...this.defaultGamepadBindings };
         }
     }
 
     saveBindings() {
         try {
             localStorage.setItem('tetrisKeyBindings', JSON.stringify(this.bindings));
+            localStorage.setItem('tetrisGamepadBindings', JSON.stringify(this.gamepadBindings));
         } catch (e) {
-            console.error('Failed to save key bindings:', e);
+            console.error('Failed to save bindings:', e);
         }
     }
 
     resetToDefaults() {
         this.bindings = { ...this.defaultBindings };
+        this.gamepadBindings = { ...this.defaultGamepadBindings };
         this.saveBindings();
     }
 
@@ -159,6 +180,14 @@ class KeyBindings {
         return this.bindings[action];
     }
 
+    setGamepadBinding(action, buttonIndex) {
+        this.gamepadBindings[action] = buttonIndex;
+    }
+
+    getGamepadBinding(action) {
+        return this.gamepadBindings[action];
+    }
+
     getAction(key) {
         for (const [action, binding] of Object.entries(this.bindings)) {
             if (binding === key) {
@@ -168,9 +197,27 @@ class KeyBindings {
         return null;
     }
 
+    getGamepadAction(buttonIndex) {
+        for (const [action, binding] of Object.entries(this.gamepadBindings)) {
+            if (binding === buttonIndex) {
+                return action;
+            }
+        }
+        return null;
+    }
+
     isDuplicate(key, excludeAction = null) {
         for (const [action, binding] of Object.entries(this.bindings)) {
             if (action !== excludeAction && binding === key) {
+                return action;
+            }
+        }
+        return null;
+    }
+
+    isGamepadDuplicate(buttonIndex, excludeAction = null) {
+        for (const [action, binding] of Object.entries(this.gamepadBindings)) {
+            if (action !== excludeAction && binding === buttonIndex) {
                 return action;
             }
         }
@@ -192,6 +239,29 @@ class KeyBindings {
         if (code.startsWith('Digit')) return code.substring(5);
         return code;
     }
+
+    getGamepadButtonDisplay(buttonIndex) {
+        if (buttonIndex === null || buttonIndex === undefined) return 'NONE';
+        const buttonMap = {
+            0: 'A (0)',
+            1: 'B (1)',
+            2: 'X (2)',
+            3: 'Y (3)',
+            4: 'L1 (4)',
+            5: 'R1 (5)',
+            6: 'L2 (6)',
+            7: 'R2 (7)',
+            8: 'SELECT (8)',
+            9: 'START (9)',
+            10: 'L3 (10)',
+            11: 'R3 (11)',
+            12: '↑ (12)',
+            13: '↓ (13)',
+            14: '← (14)',
+            15: '→ (15)'
+        };
+        return buttonMap[buttonIndex] || `BTN ${buttonIndex}`;
+    }
 }
 
 // ========================================
@@ -200,8 +270,8 @@ class KeyBindings {
 class GameSettings {
     constructor() {
         this.defaults = {
-            dasDelay: 300,
-            arrInterval: 40,
+            dasDelay: 200,
+            arrInterval: 20,
             bgType: 'preset',
             bgValue: 'default'
         };
@@ -274,6 +344,9 @@ class TetrisGame {
         this.level = 1;
         this.renCount = 0;
         this.maxRen = 0;
+        this.totalAttacks = 0;
+        this.totalReceivedAttacks = 0;
+        this.isBackToBack = false;
 
         this.gameOver = false;
         this.isPaused = false;
@@ -283,6 +356,9 @@ class TetrisGame {
         this.bestScore = 0;
         this.bestTime = Infinity;
         this.bestRen = 0;
+        this.bestSurvival = 0; // マラソンと同様に生存時間を管理
+        this.bestSurvivalSerial = 0;
+        this.survivalType = 'normal'; // 'normal' or 'serial'
 
         this.loadHighScores();
         this.dropInterval = INITIAL_SPEED;
@@ -303,6 +379,9 @@ class TetrisGame {
         this.particles = [];
         this.tspinTimeout = null;
         this.renTimeout = null;
+        this.garbageTimer = 0;
+        this.garbageInterval = 10000;
+        this.isGarbageWarning = false;
 
         // 入力管理 (DAS/ARR)
         this.keysState = {};
@@ -310,6 +389,7 @@ class TetrisGame {
         this.arrTimer = 0;
         this.softDropTimer = 0;
         this.lastAction = null;
+        this.lastGamepadButtons = {}; // 前フレームのボタン状態（エッジ検出用）
 
         this.initializeNextQueue();
         this.setupEventListeners();
@@ -325,6 +405,8 @@ class TetrisGame {
                 this.bestScore = highScores.marathon || 0;
                 this.bestTime = highScores.sprint || Infinity;
                 this.bestRen = highScores.ren4 || 0;
+                this.bestSurvival = highScores.survival || 0;
+                this.bestSurvivalSerial = highScores.survivalSerial || 0;
             }
         } catch (e) {
             console.error('Failed to load high scores:', e);
@@ -336,12 +418,48 @@ class TetrisGame {
             const highScores = {
                 marathon: this.bestScore,
                 sprint: this.bestTime,
-                ren4: this.bestRen
+                ren4: this.bestRen,
+                survival: this.bestSurvival,
+                survivalSerial: this.bestSurvivalSerial
             };
             localStorage.setItem('tetrisHighScores', JSON.stringify(highScores));
         } catch (e) {
             console.error('Failed to save high scores:', e);
         }
+    }
+
+    updateBestDisplay() {
+        const label = document.getElementById('best-label');
+        const value = document.getElementById('best-value');
+        if (!label || !value) return;
+
+        switch (this.gameMode) {
+            case 'marathon':
+                label.textContent = 'BEST SCORE';
+                value.textContent = this.bestScore.toLocaleString();
+                break;
+            case '40lines':
+                label.textContent = 'BEST TIME';
+                value.textContent = (this.bestTime === Infinity) ? '--:--.--' : this.formatTimeShort(this.bestTime);
+                break;
+            case 'ren4':
+                label.textContent = 'BEST REN';
+                value.textContent = this.bestRen.toLocaleString();
+                break;
+            case 'survival':
+                label.textContent = this.survivalType === 'serial' ? 'BEST KAKIN-ANA' : 'BEST SURVIVAL';
+                const best = this.survivalType === 'serial' ? this.bestSurvivalSerial : this.bestSurvival;
+                value.textContent = this.formatTimeShort(best);
+                break;
+        }
+    }
+
+    formatTimeShort(ms) {
+        const seconds = Math.floor(ms / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const partSec = seconds % 60;
+        const partMs = Math.floor((ms % 1000) / 10);
+        return `${minutes.toString().padStart(2, '0')}:${partSec.toString().padStart(2, '0')}.${partMs.toString().padStart(2, '0')}`;
     }
 
 
@@ -357,10 +475,11 @@ class TetrisGame {
         }
 
         // 種3の配置（計3ブロックにする）
-        // 4列レン用の種（合計3つのブロックを配置）
-        this.board[19][3] = '#ff3d00';
-        this.board[19][4] = '#ff3d00';
-        this.board[19][5] = '#ff3d00';
+        // 種3の配置（可視範囲の最下段）
+        const bottom = BOARD_HEIGHT - 1;
+        this.board[bottom][3] = '#ff3d00';
+        this.board[bottom][4] = '#ff3d00';
+        this.board[bottom][5] = '#ff3d00';
         this.board[19][6] = 0;
     }
 
@@ -397,11 +516,12 @@ class TetrisGame {
         this.currentPiece = type;
         this.currentRotation = 0;
         this.currentX = Math.floor(BOARD_WIDTH / 2) - 2;
-        this.currentY = 0;
+        this.currentY = BOARD_HEIGHT - VISIBLE_HEIGHT; // 出現位置をバッファ分ずらす（40-20=20）
         this.canHold = true;
 
         this.lockDelayCounter = 0;
         this.lockResetCount = 0;
+        this.lowestY = 0; // 最低到達高度を初期化
 
         if (this.checkCollision(this.currentX, this.currentY, this.currentRotation)) {
             this.gameOver = true;
@@ -438,14 +558,22 @@ class TetrisGame {
     // ピース操作
     // ========================================
     moveLeft() {
+        const wasOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
         if (!this.checkCollision(this.currentX - 1, this.currentY, this.currentRotation)) {
             this.currentX--;
             this.lastMoveWasRotation = false;
-            // 接地中に移動した場合は猶予タイマーをリセット（回数制限あり）
-            if (this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation)) {
+            // 移動前後のいずれかが接地状態であれば猶予をリセット（通算回数制限あり）
+            const isOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
+            if (wasOnGround || isOnGround) {
                 if (this.lockResetCount < MAX_LOCK_RESET) {
                     this.lockDelayCounter = 0;
                     this.lockResetCount++;
+                } else if (isOnGround) {
+                    // 既に上限に達した状態で接地したなら即座に固定
+                    this.mergePiece();
+                    this.clearLines();
+                    this.spawnPiece();
+                    this.lockDelayCounter = 0;
                 }
             }
             return true;
@@ -454,14 +582,22 @@ class TetrisGame {
     }
 
     moveRight() {
+        const wasOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
         if (!this.checkCollision(this.currentX + 1, this.currentY, this.currentRotation)) {
             this.currentX++;
             this.lastMoveWasRotation = false;
-            // 接地中に移動した場合は猶予タイマーをリセット（回数制限あり）
-            if (this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation)) {
+            // 移動前後のいずれかが接地状態であれば猶予をリセット（通算回数制限あり）
+            const isOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
+            if (wasOnGround || isOnGround) {
                 if (this.lockResetCount < MAX_LOCK_RESET) {
                     this.lockDelayCounter = 0;
                     this.lockResetCount++;
+                } else if (isOnGround) {
+                    // 既に上限に達した状態で接地したなら即座に固定
+                    this.mergePiece();
+                    this.clearLines();
+                    this.spawnPiece();
+                    this.lockDelayCounter = 0;
                 }
             }
             return true;
@@ -475,7 +611,16 @@ class TetrisGame {
             this.score += 1;
             this.updateScore();
             this.lastMoveWasRotation = false;
-            this.lockDelayCounter = 0; // 落下できればカウンターリセット
+
+            // リセット回数に余裕がある場合のみ、落下による猶予リセットを許可
+            if (this.lockResetCount < MAX_LOCK_RESET) {
+                this.lockDelayCounter = 0;
+            }
+
+            // 下がった時に高度を記録（通算制限のため回復は行わない）
+            if (this.currentY > this.lowestY) {
+                this.lowestY = this.currentY;
+            }
             return true;
         }
         return false; // 下に動けなかった
@@ -484,6 +629,7 @@ class TetrisGame {
     rotate(direction = 1) {
         if (this.currentPiece === 'O') return; // O ミノは回転しない
 
+        const wasOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
         const oldRotation = this.currentRotation;
         const newRotation = (this.currentRotation + direction + 4) % 4;
         const key = `${oldRotation}-${newRotation}`;
@@ -494,16 +640,25 @@ class TetrisGame {
         for (const [dx, dy] of kicks) {
             // SRSの座標系は上が+yだが、このゲームは下が+yなのでdyを反転
             if (!this.checkCollision(this.currentX + dx, this.currentY - dy, newRotation)) {
+                const isUpwardKick = dy > 0; // 上方向へのキックが発生したか
+
                 this.currentX += dx;
                 this.currentY -= dy;
                 this.currentRotation = newRotation;
                 this.lastMoveWasRotation = true;
 
-                // 接地中に回転した場合は猶予タイマーをリセット（回数制限あり）
-                if (this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation)) {
+                // 回転前後のいずれかが接地状態、あるいは上方へのキックが発生した場合は猶予をリセット（通算回数制限あり）
+                const isOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
+                if (wasOnGround || isOnGround || isUpwardKick) {
                     if (this.lockResetCount < MAX_LOCK_RESET) {
                         this.lockDelayCounter = 0;
                         this.lockResetCount++;
+                    } else if (isOnGround) {
+                        // 既に上限に達した状態で接地したなら即座に固定
+                        this.mergePiece();
+                        this.clearLines();
+                        this.spawnPiece();
+                        this.lockDelayCounter = 0;
                     }
                 }
                 return;
@@ -532,13 +687,21 @@ class TetrisGame {
         if (this.holdPiece === null) {
             this.holdPiece = this.currentPiece;
             this.spawnPiece();
+            // ホールド経由での出現時は1段高くする
+            this.currentY--;
         } else {
             const temp = this.holdPiece;
             this.holdPiece = this.currentPiece;
             this.currentPiece = temp;
             this.currentRotation = 0;
             this.currentX = Math.floor(BOARD_WIDTH / 2) - 2;
-            this.currentY = 0;
+            // 1段高い位置（バッファゾーン内）から出現
+            this.currentY = BOARD_HEIGHT - VISIBLE_HEIGHT - 1;
+
+            if (this.checkCollision(this.currentX, this.currentY, this.currentRotation)) {
+                this.gameOver = true;
+                this.showGameOver();
+            }
         }
 
         this.drawHold();
@@ -556,7 +719,7 @@ class TetrisGame {
                 if (shape[row][col]) {
                     const y = this.currentY + row;
                     const x = this.currentX + col;
-                    if (y >= 0) {
+                    if (y >= 0 && y < BOARD_HEIGHT && x >= 0 && x < BOARD_WIDTH) {
                         this.board[y][x] = color;
                     }
                 }
@@ -677,6 +840,7 @@ class TetrisGame {
                 this.createParticles(BOARD_WIDTH * BLOCK_SIZE / 2, rowY * BLOCK_SIZE, '#ffffff', 15);
             });
 
+            let attack = 0;
             if (finalTSpin) {
                 const tSpinScores = {
                     'T-SPIN-MINI': linesCleared === 0 ? 100 : 200,
@@ -687,13 +851,39 @@ class TetrisGame {
                 };
                 this.score += (tSpinScores[finalTSpin] || 0) * this.level;
                 this.showTSpinNotification(finalTSpin);
+
+                // 攻撃値計算 (T-Spin)
+                if (finalTSpin === 'T-SPIN-SINGLE') attack = 2;
+                else if (finalTSpin === 'T-SPIN-DOUBLE') attack = 4;
+                else if (finalTSpin === 'T-SPIN-TRIPLE') attack = 6;
+                else if (finalTSpin === 'T-SPIN-MINI' && linesCleared > 0) attack = 1;
+
+                // B2B 判定
+                if (linesCleared > 0) {
+                    if (this.isBackToBack) attack += 1;
+                    this.isBackToBack = true;
+                }
             } else if (linesCleared > 0) {
                 const lineScores = [0, 100, 300, 500, 800];
                 this.score += lineScores[linesCleared] * this.level;
                 if (linesCleared === 4) {
                     this.showTSpinNotification('TETRIS'); // 特殊通知として利用
+                    attack = 4;
+                    if (this.isBackToBack) attack += 1;
+                    this.isBackToBack = true;
+                } else {
+                    attack = [0, 0, 1, 2, 4][linesCleared];
+                    this.isBackToBack = false;
                 }
             }
+
+            // REN (Combo) 攻撃値
+            if (linesCleared > 0 && this.renCount > 1) {
+                const comboAttack = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 4, 5];
+                attack += comboAttack[Math.min(this.renCount, comboAttack.length - 1)];
+            }
+
+            this.totalAttacks += attack;
 
             // RENボーナス（ラインを消した場合のみ、2連続目から）
             if (linesCleared > 0 && actualRen > 0) {
@@ -706,15 +896,18 @@ class TetrisGame {
             if (isPerfectClear) {
                 const pcBonus = 1000 * this.level;
                 this.score += pcBonus;
+                this.totalAttacks += 10;
                 this.showPerfectClearNotification();
             }
 
-            // レベルアップ (10ラインごと)
-            const newLevel = Math.floor(this.lines / 10) + 1;
-            if (newLevel > this.level) {
-                this.level = newLevel;
-                this.dropInterval = Math.max(100, INITIAL_SPEED - (this.level - 1) * SPEED_DECREASE);
-                console.log(`Level Up! Level: ${this.level}, Speed: ${this.dropInterval}ms`);
+            // レベルアップ (マラソンモード等の場合、10ラインごと)
+            if (this.gameMode !== 'survival') {
+                const newLevel = Math.floor(this.lines / 10) + 1;
+                if (newLevel > this.level) {
+                    this.level = newLevel;
+                    this.dropInterval = INITIAL_SPEED * Math.pow(SPEED_DECREASE_RATE, this.level - 1);
+                    console.log(`Level Up! Level: ${this.level}, Speed: ${this.dropInterval}ms`);
+                }
             }
 
             this.updateScore();
@@ -744,11 +937,12 @@ class TetrisGame {
         this.ctx.fillStyle = '#000';
         this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // 固定されたブロックを描画
-        for (let row = 0; row < BOARD_HEIGHT; row++) {
+        // 固定されたブロックを描画 (可視範囲 + チラ見せ分)
+        for (let row = BOARD_HEIGHT - VISIBLE_HEIGHT - 1; row < BOARD_HEIGHT; row++) {
             for (let col = 0; col < BOARD_WIDTH; col++) {
                 if (this.board[row][col]) {
-                    this.drawBlock(col, row, this.board[row][col]);
+                    const drawY = row - (BOARD_HEIGHT - VISIBLE_HEIGHT);
+                    this.drawBlock(col, drawY + (DISPLAY_OFFSET / BLOCK_SIZE), this.board[row][col]);
                 }
             }
         }
@@ -764,7 +958,11 @@ class TetrisGame {
             for (let row = 0; row < 4; row++) {
                 for (let col = 0; col < 4; col++) {
                     if (shape[row][col]) {
-                        this.drawBlock(this.currentX + col, this.currentY + row, color);
+                        const drawY = this.currentY + row - (BOARD_HEIGHT - VISIBLE_HEIGHT);
+                        // 画面内に収まっている場合（チラ見せ分含む）のみ描画
+                        if (drawY >= -1) {
+                            this.drawBlock(this.currentX + col, drawY + (DISPLAY_OFFSET / BLOCK_SIZE), color);
+                        }
                     }
                 }
             }
@@ -810,7 +1008,10 @@ class TetrisGame {
         for (let row = 0; row < 4; row++) {
             for (let col = 0; col < 4; col++) {
                 if (shape[row][col]) {
-                    this.drawBlock(this.currentX + col, ghostY + row, color);
+                    const drawY = ghostY + row - (BOARD_HEIGHT - VISIBLE_HEIGHT);
+                    if (drawY >= -1) {
+                        this.drawBlock(this.currentX + col, drawY + (DISPLAY_OFFSET / BLOCK_SIZE), color);
+                    }
                 }
             }
         }
@@ -828,10 +1029,12 @@ class TetrisGame {
             this.ctx.stroke();
         }
 
-        for (let i = 0; i <= BOARD_HEIGHT; i++) {
+        for (let i = 0; i <= VISIBLE_HEIGHT + 1; i++) {
+            const y = i * BLOCK_SIZE - (BLOCK_SIZE - DISPLAY_OFFSET);
+            if (y < 0) continue;
             this.ctx.beginPath();
-            this.ctx.moveTo(0, i * BLOCK_SIZE);
-            this.ctx.lineTo(this.canvas.width, i * BLOCK_SIZE);
+            this.ctx.moveTo(0, y);
+            this.ctx.lineTo(this.canvas.width, y);
             this.ctx.stroke();
         }
     }
@@ -844,9 +1047,27 @@ class TetrisGame {
         const shape = TETROMINOS[type].shape[0];
         const color = TETROMINOS[type].color;
 
-        const blockSize = 20 * scale;
-        const offsetX = (canvasWidth - blockSize * 4) / 2;
-        const offsetY = (canvasHeight - blockSize * 4) / 2;
+        const blockSize = 22 * scale;
+
+        // ミノの実際の範囲を計算
+        let minRow = 4, maxRow = 0, minCol = 4, maxCol = 0;
+        for (let row = 0; row < 4; row++) {
+            for (let col = 0; col < 4; col++) {
+                if (shape[row][col]) {
+                    minRow = Math.min(minRow, row);
+                    maxRow = Math.max(maxRow, row);
+                    minCol = Math.min(minCol, col);
+                    maxCol = Math.max(maxCol, col);
+                }
+            }
+        }
+
+        const pieceWidth = (maxCol - minCol + 1) * blockSize;
+        const pieceHeight = (maxRow - minRow + 1) * blockSize;
+
+        // Canvas内の中央に配置するためのオフセット
+        const offsetX = (canvasWidth - pieceWidth) / 2 - minCol * blockSize;
+        const offsetY = (canvasHeight - pieceHeight) / 2 - minRow * blockSize;
 
         for (let row = 0; row < 4; row++) {
             for (let col = 0; col < 4; col++) {
@@ -882,7 +1103,7 @@ class TetrisGame {
                 this.nextQueue[i],
                 this.nextCanvases[i].width,
                 this.nextCanvases[i].height,
-                0.8
+                0.85 // 80px枠に合わせる
             );
         }
     }
@@ -897,10 +1118,25 @@ class TetrisGame {
         document.getElementById('ren').textContent = Math.max(0, this.renCount - 1);
         document.getElementById('time').textContent = this.formatTime(this.elapsedTime);
 
+        // APMの表示
+        const sentApmElement = document.getElementById('apm');
+        const recvApmElement = document.getElementById('recv-apm');
+        if (this.elapsedTime > 0) {
+            const timeInMinutes = this.elapsedTime / 60000;
+            if (sentApmElement) {
+                sentApmElement.textContent = (this.totalAttacks / timeInMinutes).toFixed(2);
+            }
+            // 受信APMはサバイバルモード時のみ表示を更新
+            if (recvApmElement && this.gameMode === 'survival') {
+                recvApmElement.textContent = (this.totalReceivedAttacks / timeInMinutes).toFixed(2);
+            }
+        } else {
+            if (sentApmElement) sentApmElement.textContent = '0.00';
+            if (recvApmElement) recvApmElement.textContent = '0.00';
+        }
+
         // リアルタイムでベスト記録を表示に反映
-        document.getElementById('best-score').textContent = Math.max(this.bestScore, this.score);
-        document.getElementById('best-time').textContent = this.bestTime === Infinity ? '--:--.--' : this.formatTime(this.bestTime);
-        document.getElementById('best-ren').textContent = Math.max(this.bestRen, this.maxRen);
+        this.updateBestDisplay();
     }
 
     formatTime(ms) {
@@ -924,12 +1160,12 @@ class TetrisGame {
         this.gameOver = true;
         const overlay = document.getElementById('game-over-overlay');
         const title = overlay.querySelector('.game-over-title');
-        const finalScoreElement = document.getElementById('final-score'); // Renamed to avoid conflict
+        const statsContainer = overlay.querySelector('.final-score'); // Container instead of direct ID link
 
         if (isWin) {
             title.textContent = 'COMPLETE!';
             title.style.color = '#FFD700';
-            finalScoreElement.parentElement.innerHTML = `タイム: <span id="final-score">${this.formatTime(this.elapsedTime)}</span>`;
+            statsContainer.innerHTML = `タイム: <span id="final-score">${this.formatTime(this.elapsedTime)}</span>`;
 
             // 40ラインベストタイム更新チェック
             if (this.elapsedTime < this.bestTime) {
@@ -939,32 +1175,54 @@ class TetrisGame {
             title.textContent = 'GAME OVER';
             title.style.color = 'var(--accent-secondary)';
             if (this.gameMode === 'ren4') {
-                finalScoreElement.parentElement.innerHTML = `最高REN: <span id="final-score">${this.maxRen}</span>`;
+                statsContainer.innerHTML = `最高REN: <span id="final-score">${this.maxRen}</span>`;
+            } else if (this.gameMode === 'survival') {
+                statsContainer.innerHTML = `
+                    <div style="display: flex; flex-direction: column; gap: 8px; align-items: center;">
+                        <div>スコア: <span id="final-score">${this.score.toLocaleString()}</span></div>
+                        <div>タイム: <span style="color: var(--accent-primary);">${this.formatTime(this.elapsedTime)}</span></div>
+                    </div>
+                `;
             } else {
-                finalScoreElement.parentElement.innerHTML = `スコア: <span id="final-score">${this.score}</span>`;
+                statsContainer.innerHTML = `スコア: <span id="final-score">${this.score.toLocaleString()}</span>`;
             }
         }
 
-        // 共通の記録更新チェック
+        // ベスト記録の更新チェック
         let updated = false;
 
-        // マラソンハイスコア更新チェック
-        if (this.gameMode === 'marathon' && this.score > this.bestScore) {
-            this.bestScore = this.score;
-            updated = true;
+        if (this.gameMode === 'marathon') {
+            if (this.score > this.bestScore) {
+                this.bestScore = this.score;
+                updated = true;
+            }
+        } else if (this.gameMode === '40lines' && isWin) {
+            if (this.elapsedTime < this.bestTime) {
+                this.bestTime = this.elapsedTime;
+                updated = true;
+            }
+        } else if (this.gameMode === 'ren4') {
+            if (this.maxRen > this.bestRen) {
+                this.bestRen = this.maxRen;
+                updated = true;
+            }
+        } else if (this.gameMode === 'survival') {
+            if (this.survivalType === 'serial') {
+                if (this.elapsedTime > this.bestSurvivalSerial) {
+                    this.bestSurvivalSerial = this.elapsedTime;
+                    updated = true;
+                }
+            } else {
+                if (this.elapsedTime > this.bestSurvival) {
+                    this.bestSurvival = this.elapsedTime;
+                    updated = true;
+                }
+            }
         }
 
-        // 最高REN更新チェック (全モード共通)
-        if (this.maxRen > this.bestRen) {
-            this.bestRen = this.maxRen;
-            updated = true;
-        }
-
-        // タイム更新チェック (Sprintモード)
-        if (isWin && this.elapsedTime < this.bestTime) {
-            // すでに上で this.bestTime は更新されているので、ここでは updated フラグのみ立てる
-            // or 上の処理をここに寄せる
-            updated = true;
+        if (updated) {
+            this.saveHighScores();
+            this.updateBestDisplay();
         }
 
         if (updated || isWin) {
@@ -975,14 +1233,38 @@ class TetrisGame {
         overlay.classList.add('active');
     }
 
+    async shareToX() {
+        let text = '';
+        if (this.gameMode === 'ren4') {
+            text = `無限4列RENで ${this.maxRen} RENでした！`;
+        } else if (this.gameMode === '40lines') {
+            text = `40ラインモードでタイム ${this.formatTime(this.elapsedTime)} でした！`;
+        } else if (this.gameMode === 'survival') {
+            const modeName = this.survivalType === 'serial' ? '課金穴サバイバル' : '通常サバイバル';
+            text = `${modeName}でスコア ${this.score.toLocaleString()} / タイム ${this.formatTime(this.elapsedTime)} でした！`;
+        } else {
+            text = `マラソンモードでスコア ${this.score.toLocaleString()} でした！`;
+        }
+
+        const hashtags = '無限4列REN,TETRIN';
+        const url = window.location.href;
+
+        // X(Twitter)の投稿用URLを生成
+        const twitterUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&hashtags=${encodeURIComponent(hashtags)}`;
+
+        // 新しいタブで開く
+        window.open(twitterUrl, '_blank');
+    }
+
     // ========================================
     // ゲームループ
     // ========================================
     update(time = 0) {
+        this.pollGamepad();
+
         if (!this.isRunning || this.gameOver || this.isPaused) {
-            if (this.isRunning && !this.gameOver) {
-                requestAnimationFrame((t) => this.update(t));
-            }
+            // ゲームオーバー時やポーズ時もゲームパッド入力を継続的に検出するため、ループを継続
+            requestAnimationFrame((t) => this.update(t));
             return;
         }
 
@@ -1001,21 +1283,61 @@ class TetrisGame {
         if (this.dropCounter > this.dropInterval) {
             this.moveDown();
             this.dropCounter = 0;
-            // 落下した場合はリセット回数を回復させる（新しい段での猶予を認める）
-            this.lockResetCount = 0;
+            // 落下した場合は inner でリセットされるようになったので、ここでは削除
+        }
+
+        // サバイバルモードのせり上がり処理
+        if (this.gameMode === 'survival' && !this.isPaused) {
+            this.garbageTimer += deltaTime;
+
+            // 警告演出（残り2秒から）
+            if (this.garbageTimer >= this.garbageInterval - 2000 && !this.isGarbageWarning) {
+                this.isGarbageWarning = true;
+                this.showGarbageWarning();
+            }
+
+            if (this.garbageTimer >= this.garbageInterval) {
+                this.addGarbageLine();
+                this.garbageTimer = 0;
+                this.isGarbageWarning = false;
+                // レベルに応じて徐々に加速（最低1秒まで）
+                this.garbageInterval = Math.max(1000, 10000 - (this.level - 1) * 500);
+            }
+
+            // 時間経過によるレベルアップ (10秒ごと)
+            const newLevel = Math.floor(this.elapsedTime / 10000) + 1;
+            if (newLevel > this.level) {
+                this.level = newLevel;
+                this.showMessage(`LEVEL UP: ${this.level}`, 'info');
+                // せり上がり間隔も即座に再計算
+                this.garbageInterval = Math.max(1000, 10000 - (this.level - 1) * 500);
+            }
         }
 
         // 接地判定と猶予タイマーの処理
         if (this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation)) {
-            this.lockDelayCounter += deltaTime;
-            if (this.lockDelayCounter >= LOCK_DELAY_TIME) {
+            // リセット回数を使い切っている場合は即座に固定（這い上がり防止）
+            if (this.lockResetCount >= MAX_LOCK_RESET) {
                 this.mergePiece();
                 this.clearLines();
                 this.spawnPiece();
                 this.lockDelayCounter = 0;
+            } else {
+                this.lockDelayCounter += deltaTime;
+                if (this.lockDelayCounter >= LOCK_DELAY_TIME) {
+                    this.mergePiece();
+                    this.clearLines();
+                    this.spawnPiece();
+                    this.lockDelayCounter = 0;
+                }
             }
         } else {
-            this.lockDelayCounter = 0;
+            // 空中：リセット回数に余裕がある時だけタイマーをリセット
+            if (this.lockResetCount < MAX_LOCK_RESET) {
+                this.lockDelayCounter = 0;
+            }
+            // 上限到達後は空中にいてもタイマーがリセットされないため、
+            // 空中でタイマーが満了すれば落下速度によらず固定される
         }
 
         this.updateParticles(); // 追加
@@ -1027,8 +1349,9 @@ class TetrisGame {
         requestAnimationFrame((t) => this.update(t));
     }
 
-    start(mode = 'marathon') {
+    start(mode = 'marathon', survivalType = 'normal') {
         this.gameMode = mode;
+        this.survivalType = survivalType;
         this.board = this.createBoard();
         this.score = 0;
         this.lines = 0;
@@ -1042,6 +1365,11 @@ class TetrisGame {
         this.gameStartTime = performance.now();
         this.dropCounter = 0;
         this.dropInterval = INITIAL_SPEED;
+
+        this.garbageTimer = 0;
+        this.garbageInterval = 10000;
+        this.isGarbageWarning = false;
+
         this.holdPiece = null;
         this.canHold = true;
 
@@ -1055,6 +1383,17 @@ class TetrisGame {
 
         this.spawnPiece();
         this.updateScore();
+        this.updateBestDisplay();
+
+        // 特定のモードでの初期メッセージ
+        if (mode === '40lines') {
+            this.showMessage('SPRINT: 40 LINES!', 'info');
+        } else if (mode === 'ren4') {
+            this.showMessage('REN PRACTICE: 4 COLUMNS', 'info');
+        } else if (mode === 'survival') {
+            const typeLabel = survivalType === 'serial' ? 'KAKIN-ANA (4-LINE)' : 'NORMAL';
+            this.showMessage(`SURVIVAL: ${typeLabel}`, 'info');
+        }
 
         // サブタイトルの更新
         const subtitle = document.getElementById('subtitle');
@@ -1069,13 +1408,20 @@ class TetrisGame {
                 case 'ren4':
                     subtitle.textContent = 'RENの限界に挑戦';
                     break;
-                default:
-                    subtitle.textContent = '次の5個を見通せ、HOLDで戦略を';
+                case 'survival':
+                    subtitle.textContent = survivalType === 'serial' ? '4列穴固定せり上がりを耐えろ' : '迫りくる地面から生き残れ';
+                    break;
             }
         }
 
         document.getElementById('game-overlay').style.display = 'none';
         document.getElementById('game-over-overlay').classList.remove('active');
+
+        // サバイバルパネルの表示制御
+        const survivalPanel = document.getElementById('survival-panel');
+        if (survivalPanel) {
+            survivalPanel.style.display = (mode === 'survival') ? 'block' : 'none';
+        }
 
         // 通知をクリア
         const notification = document.getElementById('tspin-notification');
@@ -1087,6 +1433,92 @@ class TetrisGame {
 
         this.lastTime = performance.now();
         requestAnimationFrame((t) => this.update(t));
+    }
+
+    pollGamepad() {
+        const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+        const actions = ['moveLeft', 'moveRight', 'softDrop', 'hardDrop', 'rotateRight', 'rotateLeft', 'hold', 'hold2', 'pause', 'reset'];
+        const currentButtons = {};
+        actions.forEach(a => currentButtons[a] = false);
+
+        for (const gp of gamepads) {
+            if (!gp) continue;
+
+            const buttons = gp.buttons;
+            const axes = gp.axes;
+
+            actions.forEach(action => {
+                const btnIndex = this.keyBindings.getGamepadBinding(action);
+                if (btnIndex !== null && btnIndex !== undefined && buttons[btnIndex]?.pressed) {
+                    currentButtons[action] = true;
+                }
+            });
+
+            // スティック操作の集約 (デッドゾーン 0.5)
+            if (axes[0] < -0.5) currentButtons['moveLeft'] = true;
+            if (axes[0] > 0.5) currentButtons['moveRight'] = true;
+            if (axes[1] > 0.5) currentButtons['softDrop'] = true;
+        }
+
+        // 状態の更新とエッジ検出
+        for (const actionName of actions) {
+            const isPressed = currentButtons[actionName];
+            const wasPressed = this.lastGamepadButtons[actionName] || false;
+
+            if (isPressed) {
+                // キーボードが押されていないときのみ、ゲームパッドの状態を反映（共存）
+                this.keysState[actionName] = true;
+
+                // 押し下げられた瞬間 (Edge Detection)
+                if (!wasPressed) {
+                    this.handleButtonDown(actionName);
+                }
+            } else if (wasPressed) {
+                this.keysState[actionName] = false;
+            }
+
+            this.lastGamepadButtons[actionName] = isPressed;
+        }
+    }
+
+    handleButtonDown(action) {
+        if (!this.isRunning || this.gameOver) {
+            if (action === 'reset') {
+                this.quickReset();
+                return;
+            }
+            return;
+        }
+
+        if (this.isPaused) {
+            if (action === 'pause') this.pause();
+            return;
+        }
+
+        switch (action) {
+            case 'moveLeft':
+                this.moveLeft();
+                this.lastAction = 'moveLeft';
+                this.dasTimer = 0;
+                break;
+            case 'moveRight':
+                this.moveRight();
+                this.lastAction = 'moveRight';
+                this.dasTimer = 0;
+                break;
+            case 'softDrop':
+                this.moveDown();
+                this.softDropTimer = 0;
+                break;
+            case 'rotateRight': this.rotate(1); break;
+            case 'rotateLeft': this.rotate(-1); break;
+            case 'hold': this.hold(); break;
+            case 'hold2': this.hold(); break;
+            case 'hardDrop': this.hardDrop(); break;
+            case 'pause': this.pause(); break;
+            case 'reset': this.quickReset(); break;
+        }
+        this.draw();
     }
 
     handleInputs(deltaTime) {
@@ -1143,6 +1575,9 @@ class TetrisGame {
         this.level = 1;
         this.renCount = 0;
         this.maxRen = 0;
+        this.totalAttacks = 0;
+        this.totalReceivedAttacks = 0;
+        this.isBackToBack = false;
         this.holdPiece = null;
         this.canHold = true;
         this.bag = [];
@@ -1152,6 +1587,11 @@ class TetrisGame {
         this.lockResetCount = 0;
         this.elapsedTime = 0;
         this.gameStartTime = performance.now();
+
+        // サバイバルモード関連の状態をリセット
+        this.garbageTimer = 0;
+        this.garbageInterval = 10000;
+        this.isGarbageWarning = false;
 
         this.initializeNextQueue();
 
@@ -1165,6 +1605,7 @@ class TetrisGame {
         this.gameOver = false;
         this.isPaused = false;
         this.isRunning = true;
+        this.updateBestDisplay();
 
         document.getElementById('game-over-overlay').classList.remove('active');
 
@@ -1196,12 +1637,19 @@ class TetrisGame {
         this.level = 1;
         this.renCount = 0;
         this.maxRen = 0;
+        this.totalAttacks = 0;
+        this.totalReceivedAttacks = 0;
+        this.isBackToBack = false;
         this.holdPiece = null;
         this.canHold = true;
         this.bag = [];
         this.dropCounter = 0;
         this.dropInterval = INITIAL_SPEED;
         this.elapsedTime = 0;
+
+        this.garbageTimer = 0;
+        this.garbageInterval = 10000;
+        this.isGarbageWarning = false;
 
         this.initializeNextQueue();
         this.updateScore();
@@ -1219,6 +1667,12 @@ class TetrisGame {
         const subtitle = document.getElementById('subtitle');
         if (subtitle) {
             subtitle.textContent = '次の5個を見通せ、HOLDで戦略を';
+        }
+
+        // サバイバルパネルの非表示
+        const survivalPanel = document.getElementById('survival-panel');
+        if (survivalPanel) {
+            survivalPanel.style.display = 'none';
         }
     }
 
@@ -1282,6 +1736,9 @@ class TetrisGame {
                     case 'hold':
                         this.hold();
                         break;
+                    case 'hold2':
+                        this.hold();
+                        break;
                     case 'pause':
                         this.pause();
                         break;
@@ -1321,6 +1778,28 @@ class TetrisGame {
             this.start('ren4');
         });
 
+        // モード選択UIの制御
+        const mainModeSelect = document.getElementById('main-mode-select');
+        const survivalModeSelect = document.getElementById('survival-mode-select');
+
+        document.getElementById('show-survival-menu').addEventListener('click', () => {
+            mainModeSelect.style.display = 'none';
+            survivalModeSelect.style.display = 'flex';
+        });
+
+        document.getElementById('back-to-main').addEventListener('click', () => {
+            mainModeSelect.style.display = 'flex';
+            survivalModeSelect.style.display = 'none';
+        });
+
+        document.getElementById('start-survival-normal').addEventListener('click', () => {
+            this.start('survival', 'normal');
+        });
+
+        document.getElementById('start-survival-serial').addEventListener('click', () => {
+            this.start('survival', 'serial');
+        });
+
         document.getElementById('restart-btn').addEventListener('click', () => {
             this.quickReset();
         });
@@ -1343,6 +1822,10 @@ class TetrisGame {
 
         document.getElementById('return-title-gameover-btn').addEventListener('click', () => {
             this.returnToTitle();
+        });
+
+        document.getElementById('share-x-btn').addEventListener('click', () => {
+            this.shareToX();
         });
     }
 
@@ -1462,6 +1945,65 @@ class TetrisGame {
             notification.className = 'tspin-notification';
             this.tspinTimeout = null;
         }, 2000);
+    }
+
+    // サバイバルモード用：せり上がりロジック
+    addGarbageLine() {
+        // 出現位置（可視範囲の最上段中央付近）にお邪魔ミノが到達するかチェック
+        const spawnX = Math.floor(BOARD_WIDTH / 2) - 2;
+        const visibleTop = BOARD_HEIGHT - VISIBLE_HEIGHT;
+        const targetRows = [visibleTop, visibleTop + 1];
+
+        let garbageReachesTop = false;
+        for (let r of targetRows) {
+            for (let c = spawnX; c < spawnX + 4; c++) {
+                if (this.board[r][c] === '#7d7d7d') {
+                    garbageReachesTop = true;
+                    break;
+                }
+            }
+            if (garbageReachesTop) break;
+        }
+
+        if (garbageReachesTop) {
+            this.showGameOver();
+            return;
+        }
+
+        const linesToAdd = this.survivalType === 'serial' ? 4 : 1;
+        this.totalReceivedAttacks += linesToAdd;
+        const holeIndex = Math.floor(Math.random() * BOARD_WIDTH);
+
+        for (let l = 0; l < linesToAdd; l++) {
+            // 全てを1段上にずらす
+            for (let y = 0; y < BOARD_HEIGHT - 1; y++) {
+                this.board[y] = [...this.board[y + 1]];
+            }
+
+            // 最下段に穴空きラインを追加
+            const currentHole = this.survivalType === 'serial' ? holeIndex : Math.floor(Math.random() * BOARD_WIDTH);
+            const garbageColor = '#7d7d7d';
+            this.board[BOARD_HEIGHT - 1] = new Array(BOARD_WIDTH).fill(garbageColor);
+            this.board[BOARD_HEIGHT - 1][currentHole] = 0;
+
+            // 現在のピースが重なる場合は上にずらす
+            if (this.checkCollision(this.currentX, this.currentY, this.currentRotation)) {
+                this.currentY--;
+                // それでも衝突する場合はゲームオーバー
+                if (this.checkCollision(this.currentX, this.currentY, this.currentRotation)) {
+                    this.showGameOver();
+                    return;
+                }
+            }
+        }
+
+        this.draw();
+        this.showMessage(this.survivalType === 'serial' ? 'KAKIN-ANA GARBAGE!' : 'GARBAGE RISE!');
+    }
+
+    showGarbageWarning() {
+        this.shakeBoard();
+        // ボードを赤くフラッシュさせる（簡易的にCSSクラス付与などで対応可能だが、ここでは揺れのみ）
     }
 
     showRenNotification(renCount) {
@@ -1600,6 +2142,14 @@ class TetrisGame {
             btn.addEventListener('click', (e) => {
                 const action = e.target.getAttribute('data-action');
                 this.startKeyListening(action);
+            });
+        });
+
+        // ゲームパッドのリバインドボタン
+        document.querySelectorAll('.btn-rebind-gp').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const action = e.target.getAttribute('data-action');
+                this.startGamepadListening(action);
             });
         });
 
@@ -1765,11 +2315,20 @@ class TetrisGame {
     }
 
     loadKeyBindingsToUI() {
-        const actions = ['moveLeft', 'moveRight', 'softDrop', 'hardDrop', 'rotateRight', 'rotateLeft', 'hold', 'pause', 'reset'];
+        const actions = ['moveLeft', 'moveRight', 'softDrop', 'hardDrop', 'rotateRight', 'rotateLeft', 'hold', 'hold2', 'pause', 'reset'];
         actions.forEach(action => {
-            const input = document.getElementById(`key-${action}`);
-            const key = this.keyBindings.getBinding(action);
-            input.value = this.keyBindings.getKeyDisplay(key);
+            // キーボード
+            const keyInput = document.getElementById(`key-${action}`);
+            if (keyInput) {
+                const key = this.keyBindings.getBinding(action);
+                keyInput.value = this.keyBindings.getKeyDisplay(key);
+            }
+            // ゲームパッド
+            const gpInput = document.getElementById(`gp-${action}`);
+            if (gpInput) {
+                const buttonIndex = this.keyBindings.getGamepadBinding(action);
+                gpInput.value = this.keyBindings.getGamepadButtonDisplay(buttonIndex);
+            }
         });
     }
 
@@ -1814,9 +2373,60 @@ class TetrisGame {
         document.querySelectorAll('.key-input').forEach(input => {
             input.classList.remove('listening');
         });
-        document.querySelectorAll('.btn-rebind').forEach(btn => {
+        document.querySelectorAll('.btn-rebind, .btn-rebind-gp').forEach(btn => {
             btn.classList.remove('active');
         });
+
+        // ゲームパッドのリバインドループ用フラグをクリア
+        this.isGamepadListening = false;
+        if (this.gamepadListeningInterval) {
+            clearInterval(this.gamepadListeningInterval);
+            this.gamepadListeningInterval = null;
+        }
+    }
+
+    startGamepadListening(action) {
+        this.clearAllListeningStates();
+
+        const input = document.getElementById(`gp-${action}`);
+        const btn = document.querySelector(`.btn-rebind-gp[data-action="${action}"]`);
+
+        input.classList.add('listening');
+        btn.classList.add('active');
+
+        this.showMessage('ゲームパッドのボタンを押してください...', 'info');
+
+        this.isGamepadListening = true;
+
+        // ポーリングでボタン入力を待ち受ける
+        this.gamepadListeningInterval = setInterval(() => {
+            const gamepads = navigator.getGamepads();
+
+            for (const gp of gamepads) {
+                if (!gp) continue;
+
+                for (let i = 0; i < gp.buttons.length; i++) {
+                    if (gp.buttons[i].pressed) {
+                        const buttonIndex = i;
+
+                        // 重複チェック
+                        const duplicate = this.keyBindings.isGamepadDuplicate(buttonIndex, action);
+                        if (duplicate) {
+                            this.showMessage(`このボタンは既に「${this.getActionLabel(duplicate)}」に割り当てられています`, 'error');
+                            return;
+                        }
+
+                        // バインド更新
+                        this.keyBindings.setGamepadBinding(action, buttonIndex);
+                        input.value = this.keyBindings.getGamepadButtonDisplay(buttonIndex);
+
+                        this.showMessage('ボタンを設定しました', 'success');
+                        this.clearAllListeningStates();
+                        return;
+                    }
+                }
+            }
+        }, 100);
     }
 
     showMessage(text, type) {
