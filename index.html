@@ -1,0 +1,1013 @@
+<nav>
+    <a href="./nav.html">Home</a>
+    <a href="./about.html">About</a>
+    <a href="./privacy.html">Privacy</a>
+    <a href="./terms.html">Terms</a>
+    <a href="./contact.html">Contact</a>
+</nav>
+
+
+<!DOCTYPE html>
+<html lang="ja">
+
+<head>
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="NEXT 5個表示とHOLD機能を備えたモダンなテトリスゲーム">
+    <title>テトリス - Modern Tetris Game</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Inter:wght@400;600;700&display=swap"
+        rel="stylesheet">
+    <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2786793705249379"
+        crossorigin="anonymous"></script>
+    <script>
+        // 背景のちらつき防止: localStorageから設定を即座に読み込んで適用
+        (function () {
+            try {
+                const saved = localStorage.getItem('tetrisGameSettings');
+                let bgType = 'preset';
+                let bgValue = 'default';
+
+                if (saved) {
+                    const settings = JSON.parse(saved);
+                    bgType = settings.bgType || 'preset';
+                    bgValue = settings.bgValue || 'default';
+                }
+
+                if (bgType === 'preset') {
+                    document.documentElement.classList.add('bg-preset-' + bgValue);
+                } else if (bgType === 'color') {
+                    const style = document.createElement('style');
+                    style.id = 'bg-override-style';
+                    style.innerHTML = 'body { background: ' + bgValue + ' !important; }';
+                    document.head.appendChild(style);
+                } else if (bgType === 'image') {
+                    // キャッシュされた背景画像があればそれを適用
+                    let cachedBg = null;
+                    try {
+                        cachedBg = localStorage.getItem('tetrisCachedBg');
+                    } catch (e) { }
+
+                    const style = document.createElement('style');
+                    style.id = 'bg-override-style';
+
+                    if (cachedBg) {
+                        style.innerHTML = 'body { background: linear-gradient(rgba(0,0,0,0.5), rgba(0,0,0,0.5)), url("' + cachedBg + '") !important; background-size: cover !important; background-position: center !important; background-attachment: fixed !important; }';
+                    } else {
+                        style.innerHTML = 'body { background: #050505 !important; }';
+                    }
+                    document.head.appendChild(style);
+                }
+            } catch (e) { }
+        })();
+    </script>
+</head>
+
+
+
+<body class="bg-no-transition">
+    <div class="container">
+        <header>
+            <h1 class="game-title">
+                <span class="title-glow">TETRIN</span>
+            </h1>
+            <p class="subtitle" id="subtitle">テトリスの講師 理想のテトリス</p>
+        </header>
+
+        <div id="single-player-mode">
+            <div class="game-wrapper">
+                <!-- Left Panel - HOLD & STATS (Moved back to Left) -->
+                <div class="side-panel">
+                    <div class="panel-card hold-panel">
+                        <h2 class="panel-title">HOLD</h2>
+                        <div class="hold-area">
+                            <canvas id="hold-canvas" width="100" height="100"></canvas>
+                        </div>
+                        <p class="hold-hint">C または Shift</p>
+                    </div>
+
+                    <div class="panel-card stats-panel">
+                        <div class="stat-item high-score-item" id="best-record-item">
+                            <span class="stat-label" id="best-label">BEST SCORE</span>
+                            <span class="stat-value" id="best-value">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">SCORE</span>
+                            <span class="stat-value" id="score">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">LEVEL</span>
+                            <span class="stat-value" id="level">1</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">LINES</span>
+                            <span class="stat-value" id="lines">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">REN</span>
+                            <span class="stat-value" id="ren">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">TIME</span>
+                            <span class="stat-value" id="time">00:00.00</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">APM</span>
+                            <span class="stat-value" id="apm">0.00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Center - Game Board -->
+                <div class="game-center">
+                    <div class="board-container">
+                        <div class="garbage-meter">
+                            <div class="garbage-meter-fill" id="garbage-meter-fill"></div>
+                        </div>
+                        <canvas id="game-canvas" width="300" height="606"></canvas>
+                        <div class="countdown-overlay" id="countdown-overlay"></div>
+                        <div class="game-overlay" id="game-overlay">
+                            <div class="overlay-content">
+                                <h2 class="overlay-title">TETRIN</h2>
+                                <div class="mode-select" id="main-mode-select">
+                                    <button class="btn-start" id="show-esports-menu"
+                                        style="background: linear-gradient(135deg, #a000ff, #5500aa); box-shadow: 0 0 15px rgba(160, 0, 255, 0.4);">e-sports</button>
+                                    <button class="btn-start btn-practice" id="start-practice">プラクティス</button>
+                                    <button class="btn-start btn-versus" id="show-versus-setup"
+                                        style="background: linear-gradient(135deg, #ff0055, #ff5500); box-shadow: 0 0 15px rgba(255, 0, 85, 0.4);">対戦モード
+                                        (β)</button>
+                                </div>
+
+                                <div class="mode-select" id="esports-mode-select" style="display: none;">
+                                    <button class="btn-start" id="show-sprint-menu">SPRINT</button>
+                                    <button class="btn-start btn-ren4" id="start-ren4">無限4列REN</button>
+                                    <button class="btn-start btn-survival" id="show-survival-menu">サバイバル</button>
+                                    <button class="btn-start btn-back" id="back-to-main-from-esports">戻る</button>
+                                </div>
+
+                                <div class="mode-select" id="sprint-mode-select" style="display: none;">
+                                    <button class="btn-start" id="start-marathon">マラソン</button>
+                                    <button class="btn-start btn-sprint" id="start-40lines">40ライン</button>
+                                    <button class="btn-start btn-sprint" id="start-t20">T20 Sprint</button>
+                                    <button class="btn-start btn-back" id="back-to-esports-from-sprint">戻る</button>
+                                </div>
+
+                                <div class="mode-select" id="versus-setup-menu" style="display: none;">
+                                    <div
+                                        style="margin-bottom: 20px; display: flex; justify-content: center; gap: 20px;">
+                                        <label class="mode-option" id="vs-type-cpu">
+                                            <input type="radio" name="versus-type" value="cpu" checked>
+                                            <span>VS CPU</span>
+                                        </label>
+                                        <label class="mode-option" id="vs-type-2p">
+                                            <input type="radio" name="versus-type" value="2p">
+                                            <span>VS 2P</span>
+                                        </label>
+                                    </div>
+                                    <div id="cpu-settings-container"
+                                        style="margin-bottom: 20px; font-size: 1.1em; display: flex; flex-direction: column; align-items: center; gap: 15px; color: #fff; width: 100%;">
+                                        <div id="cpu-level-item"
+                                            style="display:flex; flex-direction: column; align-items: center; width: 100%; gap: 10px; transition: all 0.3s ease; padding: 10px; border-radius: 12px;">
+                                            <div
+                                                style="display:flex; justify-content:space-between; width: 80%; border-bottom: 1px solid #444; padding-bottom: 5px;">
+                                                <span>CPU LEVEL</span>
+                                                <span id="cpu-level-display"
+                                                    style="color: #ff0055; font-weight: bold; font-size: 1.5em;">1</span>
+                                            </div>
+                                            <input type="range" id="cpu-level-slider" min="1" max="10" value="1"
+                                                step="1" style="width: 80%; cursor: pointer;">
+                                            <div style="font-size: 0.8em; color: #888;">レベル10は開発者レベルの強さです</div>
+                                        </div>
+                                    </div>
+                                    <button class="btn-start" id="start-versus-match"
+                                        style="background: #00f0ff; color: #000; width: 80%;">試合開始</button>
+                                    <button class="btn-start" id="back-to-main-from-versus"
+                                        style="font-size: 0.8em; margin-top: 10px; width: 50%;">戻る</button>
+                                </div>
+                                <!-- ... existing modes ... -->
+                                <div class="mode-select" id="survival-mode-select" style="display: none;">
+                                    <!-- ... survival contents ... -->
+                                    <div class="level-selector">
+                                        <label class="level-option">
+                                            <input type="radio" name="survival-level" value="1" checked>
+                                            <span>Level 1</span>
+                                        </label>
+                                        <label class="level-option">
+                                            <input type="radio" name="survival-level" value="10">
+                                            <span>Level 10</span>
+                                        </label>
+                                    </div>
+
+                                    <!-- 通常サバイバル -->
+                                    <div class="survival-mode-card">
+                                        <button class="btn-start btn-survival"
+                                            id="start-survival-normal">通常サバイバル</button>
+                                    </div>
+
+                                    <!-- 課金穴サバイバル -->
+                                    <div class="survival-mode-card">
+                                        <button class="btn-start btn-serial"
+                                            id="start-survival-serial">課金穴サバイバル</button>
+                                    </div>
+
+                                    <button class="btn-start btn-back" id="back-to-main">戻る</button>
+                                </div>
+
+                                <div class="mode-select" id="practice-mode-select" style="display: none;">
+                                    <h3 style="color: #00f0ff; margin-bottom: 20px;">PRACTICE MODE</h3>
+                                    <button class="btn-start btn-practice" id="start-practice-free">フリーモード</button>
+                                    <button class="btn-start btn-practice" id="btn-open-dpc-menu"
+                                        style="background: linear-gradient(135deg, #FF9800, #F57C00); border-color: #FF9800;">DPC練習</button>
+                                    <button class="btn-start btn-back" id="back-to-main-from-practice">戻る</button>
+                                </div>
+
+                                <div class="mode-select" id="dpc-mode-select" style="display: none;">
+                                    <h3 style="color: #FF9800; margin-bottom: 20px;">DPC PRACTICE</h3>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-t"
+                                        style="background: linear-gradient(135deg, #b300ff, #5500aa); border-color: #b300ff;">Left
+                                        T</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-o"
+                                        style="background: linear-gradient(135deg, #ffeb3b, #ffc107); border-color: #ffeb3b; color: #000; text-shadow: none;">Left
+                                        O</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-s"
+                                        style="background: linear-gradient(135deg, #00e676, #00c853); border-color: #00e676; color: #000; text-shadow: none;">Left
+                                        S</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-z"
+                                        style="background: linear-gradient(135deg, #ff1744, #d50000); border-color: #ff1744;">Left
+                                        Z</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-i"
+                                        style="background: linear-gradient(135deg, #00e5ff, #00b8d4); border-color: #00e5ff; color: #000; text-shadow: none;">Left
+                                        I</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-j"
+                                        style="background: linear-gradient(135deg, #0000ff, #0000aa); border-color: #0000ff;">Left
+                                        J</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-l"
+                                        style="background: linear-gradient(135deg, #ff9100, #ff6d00); border-color: #ff9100; color: #000; text-shadow: none;">Left
+                                        L</button>
+                                    <button class="btn-start btn-practice" id="start-practice-dpc-left-osz"
+                                        style="background: linear-gradient(135deg, #ff00ff, #ff66cc); border-color: #ff00ff; color: #fff; text-shadow: 0 0 5px rgba(0,0,0,0.5);">Left
+                                        OSZ</button>
+                                    <button class="btn-start btn-back" id="back-to-practice-from-dpc">戻る</button>
+                                </div>
+                                <div class="controls-guide">
+                                    <h3>操作方法</h3>
+                                    <div class="control-row">
+                                        <span>←→</span><span>移動</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>↓</span><span>ソフトドロップ</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>↑ / X</span><span>右回転</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>Z</span><span>左回転</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>SPACE</span><span>ハードドロップ</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>C / Shift</span><span>HOLD</span>
+                                    </div>
+                                    <div class="control-row">
+                                        <span>P</span><span>ポーズ</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="game-over-overlay" id="game-over-overlay">
+                            <div class="overlay-content">
+                                <div class="new-record-badge" id="new-record-badge">NEW RECORD</div>
+                                <h2 class="overlay-title game-over-title" id="game-over-title">GAME OVER</h2>
+                                <div id="final-stats-container" class="final-score">
+                                    スコア: <span id="final-score">0</span>
+                                </div>
+                                <div class="game-over-buttons">
+                                    <button class="btn-restart btn-share-x" id="share-x-btn">Xに投稿</button>
+                                    <button class="btn-restart" id="restart-btn">もう一度プレイ</button>
+                                    <button class="btn-restart" id="return-title-gameover-btn">タイトルに戻る</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="game-controls">
+                        <button class="btn-control" id="pause-btn">ポーズ (P)</button>
+                        <button class="btn-control" id="quick-reset-btn">クイックリセット (R)</button>
+                        <button class="btn-control" id="return-title-btn">タイトルに戻る</button>
+                        <button class="btn-control" id="settings-btn">⚙️ 設定</button>
+                    </div>
+
+                    <!-- T-spin Notification -->
+                    <div class="tspin-notification" id="tspin-notification"></div>
+                    <!-- REN Notification -->
+                    <div class="ren-notification" id="ren-notification"></div>
+                    <!-- BTB Notification -->
+                    <div class="btb-pop" id="btb-pop">BACK TO BACK</div>
+                </div>
+
+                <!-- Right Panel - NEXT (Moved back to Right) -->
+                <div class="side-panel">
+                    <div class="panel-card next-panel">
+                        <h2 class="panel-title">NEXT</h2>
+                        <div class="next-area">
+                            <div class="next-piece-container">
+                                <span class="next-label">1</span>
+                                <canvas id="next-canvas-0" width="80" height="80"></canvas>
+                            </div>
+                            <div class="next-piece-container">
+                                <span class="next-label">2</span>
+                                <canvas id="next-canvas-1" width="80" height="80"></canvas>
+                            </div>
+                            <div class="next-piece-container">
+                                <span class="next-label">3</span>
+                                <canvas id="next-canvas-2" width="80" height="80"></canvas>
+                            </div>
+                            <div class="next-piece-container">
+                                <span class="next-label">4</span>
+                                <canvas id="next-canvas-3" width="80" height="80"></canvas>
+                            </div>
+                            <div class="next-piece-container">
+                                <span class="next-label">5</span>
+                                <canvas id="next-canvas-4" width="80" height="80"></canvas>
+                            </div>
+                        </div>
+
+
+
+
+                        <!-- Optimization Rate Display for Practice Mode -->
+                        <div class="practice-info-integrated" id="practice-info-panel" style="display: none;">
+                            <div class="stat-item"
+                                style="margin-top: 10px; border-top: 1px solid #333; padding-top: 10px;">
+                                <span class="stat-label">OPTIMIZATION</span>
+                                <span class="stat-value" id="optimization-rate">--%</span>
+                            </div>
+                        </div>
+
+                        <!-- Integrated Survival Info -->
+                        <div class="survival-info-integrated" id="survival-panel" style="display: none;">
+                            <div class="stat-item">
+                                <span class="stat-label">RECV APM</span>
+                                <span class="stat-value" id="recv-apm">0.00</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Optimization Rate Display (Moved outside NEXT panel) -->
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================================== -->
+        <!-- VERSUS MODE CONTAINER -->
+        <!-- ======================================== -->
+        <div id="versus-mode-container" style="display: none;">
+            <div class="versus-main-area">
+                <!-- PLAYER 1 -->
+                <div class="versus-player-section" id="p1-section">
+                    <div class="game-wrapper versus-wrapper">
+                        <!-- Left Panel -->
+                        <div class="side-panel">
+                            <div class="panel-card hold-panel">
+                                <h2 class="panel-title">HOLD</h2>
+                                <div class="hold-area">
+                                    <canvas id="p1-hold-canvas" width="100" height="100"></canvas>
+                                </div>
+                            </div>
+                            <div class="panel-card stats-panel">
+                                <div class="stat-item">
+                                    <span class="stat-label">SCORE</span>
+                                    <span class="stat-value" id="p1-score">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">LINES</span>
+                                    <span class="stat-value" id="p1-lines">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">APM</span>
+                                    <span class="stat-value" id="p1-apm">0.00</span>
+                                </div>
+                                <!-- Attack Gauge for P1 -->
+                                <div class="stat-item" style="border-left-color: #ff0055;">
+                                    <span class="stat-label">ATTACK</span>
+                                    <span class="stat-value" id="p1-garbage-pending">0</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Center -->
+                        <div class="game-center">
+                            <h2 class="player-heading">PLAYER 1</h2>
+                            <div class="board-container">
+                                <div class="garbage-meter">
+                                    <div class="garbage-meter-fill" id="p1-garbage-meter-fill"></div>
+                                </div>
+                                <canvas id="p1-game-canvas" width="300" height="606"></canvas>
+                                <div class="countdown-overlay" id="p1-countdown-overlay"></div>
+                                <div class="game-overlay" id="p1-game-overlay" style="display: none;">
+                                    <div class="overlay-content">
+                                        <h2 class="overlay-title">PLAYER 1</h2>
+                                        <div class="mode-select">
+                                            <div class="waiting-text">READY?</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="game-over-overlay" id="p1-game-over-overlay">
+                                    <div class="overlay-content">
+                                        <div class="new-record-badge" id="p1-new-record-badge">NEW RECORD</div>
+                                        <h2 class="overlay-title game-over-title" id="p1-game-over-title">LOSE</h2>
+                                        <div class="game-over-buttons">
+                                            <button class="btn-restart" id="p1-restart-btn">再戦</button>
+                                            <button class="btn-restart" id="p1-back-btn">戻る</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Notifications -->
+                            <div class="tspin-notification" id="p1-tspin-notification"></div>
+                            <div class="ren-notification" id="p1-ren-notification"></div>
+                            <div class="btb-pop" id="p1-btb-pop">BACK TO BACK</div>
+                        </div>
+
+                        <!-- Right Panel -->
+                        <div class="side-panel">
+                            <div class="panel-card next-panel">
+                                <h2 class="panel-title">NEXT</h2>
+                                <div class="next-area">
+                                    <div class="next-piece-container">
+                                        <canvas id="p1-next-canvas-0" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p1-next-canvas-1" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p1-next-canvas-2" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p1-next-canvas-3" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p1-next-canvas-4" width="80" height="80"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- VS DIVIDER -->
+                <div class="versus-divider">
+                    <div class="vs-logo">VS</div>
+                </div>
+
+                <!-- PLAYER 2 -->
+                <div class="versus-player-section" id="p2-section">
+                    <div class="game-wrapper versus-wrapper">
+                        <!-- Left Panel -->
+                        <div class="side-panel">
+                            <div class="panel-card hold-panel">
+                                <h2 class="panel-title">HOLD</h2>
+                                <div class="hold-area">
+                                    <canvas id="p2-hold-canvas" width="100" height="100"></canvas>
+                                </div>
+                            </div>
+                            <div class="panel-card stats-panel">
+                                <div class="stat-item">
+                                    <span class="stat-label">SCORE</span>
+                                    <span class="stat-value" id="p2-score">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">LINES</span>
+                                    <span class="stat-value" id="p2-lines">0</span>
+                                </div>
+                                <div class="stat-item">
+                                    <span class="stat-label">APM</span>
+                                    <span class="stat-value" id="p2-apm">0.00</span>
+                                </div>
+                                <!-- Attack Gauge for P2 -->
+                                <div class="stat-item" style="border-left-color: #ff0055;">
+                                    <span class="stat-label">ATTACK</span>
+                                    <span class="stat-value" id="p2-garbage-pending">0</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Center -->
+                        <div class="game-center">
+                            <h2 class="player-heading">PLAYER 2 (CPU)</h2>
+                            <div class="board-container">
+                                <div class="garbage-meter">
+                                    <div class="garbage-meter-fill" id="p2-garbage-meter-fill"></div>
+                                </div>
+                                <canvas id="p2-game-canvas" width="300" height="606"></canvas>
+                                <div class="countdown-overlay" id="p2-countdown-overlay"></div>
+                                <div class="game-overlay" id="p2-game-overlay" style="display: none;">
+                                    <div class="overlay-content">
+                                        <h2 class="overlay-title">PLAYER 2</h2>
+                                        <div class="mode-select">
+                                            <div class="waiting-text">READY?</div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="game-over-overlay" id="p2-game-over-overlay">
+                                    <div class="overlay-content">
+                                        <div class="new-record-badge" id="p2-new-record-badge">NEW RECORD</div>
+                                        <h2 class="overlay-title game-over-title" id="p2-game-over-title">LOSE</h2>
+                                    </div>
+                                </div>
+                            </div>
+                            <!-- Notifications -->
+                            <div class="tspin-notification" id="p2-tspin-notification"></div>
+                            <div class="ren-notification" id="p2-ren-notification"></div>
+                            <div class="btb-pop" id="p2-btb-pop">BACK TO BACK</div>
+                        </div>
+
+                        <!-- Right Panel -->
+                        <div class="side-panel">
+                            <div class="panel-card next-panel">
+                                <h2 class="panel-title">NEXT</h2>
+                                <div class="next-area">
+                                    <div class="next-piece-container">
+                                        <canvas id="p2-next-canvas-0" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p2-next-canvas-1" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p2-next-canvas-2" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p2-next-canvas-3" width="80" height="80"></canvas>
+                                    </div>
+                                    <div class="next-piece-container">
+                                        <canvas id="p2-next-canvas-4" width="80" height="80"></canvas>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="game-controls versus-controls-fixed">
+                <button class="btn-control" id="vs-pause-btn">ポーズ (P)</button>
+                <button class="btn-control" id="vs-quick-reset-btn">クイックリセット (R)</button>
+                <button class="btn-control" id="vs-return-title-btn">タイトルに戻る</button>
+                <button class="btn-control" id="vs-settings-btn">⚙️ 設定</button>
+            </div>
+        </div>
+
+        <footer>
+            <p class="footer-text">© 2026 Modern Tetris | キーボードで操作</p>
+        </footer>
+
+        <!-- Settings Modal -->
+        <div class="modal-overlay" id="settings-modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 class="modal-title">⚙️ ゲーム設定</h2>
+                    <button class="modal-close" id="close-settings">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="settings-tabs">
+                        <button class="tab-btn active" data-target="tab-controls">🎮 操作設定</button>
+                        <button class="tab-btn" data-target="tab-practice">🎓 プラクティス</button>
+                        <button class="tab-btn" data-target="tab-visuals">🖼️ 演出・サウンド</button>
+                    </div>
+
+                    <!-- Tab: Controls -->
+                    <div id="tab-controls" class="tab-pane active">
+                        <div class="sub-tabs">
+                            <button class="sub-tab-btn active" data-target="subtab-controls-p1">Player 1</button>
+                            <button class="sub-tab-btn" data-target="subtab-controls-p2">Player 2</button>
+                        </div>
+
+                        <!-- SubTab: P1 -->
+                        <div id="subtab-controls-p1" class="sub-tab-pane active">
+                            <h3 class="settings-section-title">⌨️ キーボード設定 (P1)</h3>
+                            <div class="keybind-grid">
+                                <div class="keybind-item">
+                                    <label>左移動:</label>
+                                    <input type="text" id="key-moveLeft" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="moveLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右移動:</label>
+                                    <input type="text" id="key-moveRight" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="moveRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ソフトドロップ:</label>
+                                    <input type="text" id="key-softDrop" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="softDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ハードドロップ:</label>
+                                    <input type="text" id="key-hardDrop" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="hardDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右回転:</label>
+                                    <input type="text" id="key-rotateRight" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="rotateRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>左回転:</label>
+                                    <input type="text" id="key-rotateLeft" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="rotateLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD:</label>
+                                    <input type="text" id="key-hold" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="hold">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD2:</label>
+                                    <input type="text" id="key-hold2" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="hold2">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ポーズ:</label>
+                                    <input type="text" id="key-pause" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="pause">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>クイックリセット:</label>
+                                    <input type="text" id="key-reset" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="reset">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>タイトルに戻る:</label>
+                                    <input type="text" id="key-returnToTitle" class="key-input" readonly>
+                                    <button class="btn-rebind" data-action="returnToTitle">変更</button>
+                                </div>
+                            </div>
+
+                            <div class="settings-divider"></div>
+                            <h3 class="settings-section-title">🕹️ ゲームパッド設定</h3>
+                            <div class="keybind-grid" id="gamepad-keybind-grid">
+                                <div class="keybind-item">
+                                    <label>左移動:</label>
+                                    <input type="text" id="gp-moveLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="moveLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右移動:</label>
+                                    <input type="text" id="gp-moveRight" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="moveRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ソフトドロップ:</label>
+                                    <input type="text" id="gp-softDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="softDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ハードドロップ:</label>
+                                    <input type="text" id="gp-hardDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="hardDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右回転:</label>
+                                    <input type="text" id="gp-rotateRight" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="rotateRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>左回転:</label>
+                                    <input type="text" id="gp-rotateLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="rotateLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD:</label>
+                                    <input type="text" id="gp-hold" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="hold">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD2:</label>
+                                    <input type="text" id="gp-hold2" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="hold2">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ポーズ:</label>
+                                    <input type="text" id="gp-pause" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="pause">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>クイックリセット:</label>
+                                    <input type="text" id="gp-reset" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="reset">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>タイトルに戻る:</label>
+                                    <input type="text" id="gp-returnToTitle" class="key-input" readonly>
+                                    <button class="btn-rebind-gp" data-action="returnToTitle">変更</button>
+                                </div>
+                            </div>
+                            <div style="margin-top: 15px; display: flex; justify-content: flex-end;">
+                                <button class="btn-modal" id="reset-keybindings"
+                                    style="font-size: 0.8em; padding: 5px 15px;">キー設定のみリセット</button>
+                            </div>
+
+
+                            <div class="settings-divider"></div>
+                            <h3 class="settings-section-title">🕒 操作感 (DAS / ARR)</h3>
+                            <div class="settings-grid">
+                                <div class="setting-item">
+                                    <div class="setting-label-group">
+                                        <label for="setting-das">DAS (ディレイ): <span id="value-das">300</span>ms</label>
+                                        <span class="setting-hint">長押しと認識されるまでの時間</span>
+                                    </div>
+                                    <input type="range" id="setting-das" min="100" max="500" step="10" value="300"
+                                        class="range-input">
+                                </div>
+                                <div class="setting-item">
+                                    <div class="setting-label-group">
+                                        <label for="setting-arr">ARR (連射速度): <span id="value-arr">40</span>ms</label>
+                                        <span class="setting-hint">長押し中の移動間隔</span>
+                                    </div>
+                                    <input type="range" id="setting-arr" min="10" max="100" step="5" value="40"
+                                        class="range-input">
+                                </div>
+                                <div class="setting-item">
+                                    <div class="setting-label-group">
+                                        <label for="setting-softdrop">ソフトドロップ速度: <span
+                                                id="value-softdrop">40</span>ms</label>
+                                        <span class="setting-hint">ソフトドロップ中の移動間隔</span>
+                                    </div>
+                                    <input type="range" id="setting-softdrop" min="10" max="100" step="5" value="40"
+                                        class="range-input">
+                                </div>
+                            </div>
+                            <div style="margin-top: 15px; display: flex; justify-content: flex-end;">
+                                <button class="btn-modal" id="reset-handling"
+                                    style="font-size: 0.8em; padding: 5px 15px;">操作感のみリセット</button>
+                            </div>
+
+                        </div> <!-- End SubTab P1 -->
+
+                        <!-- SubTab: P2 -->
+                        <div id="subtab-controls-p2" class="sub-tab-pane">
+                            <h3 class="settings-section-title">⌨️ Player 2 キーボード設定</h3>
+                            <div class="keybind-grid">
+                                <div class="keybind-item">
+                                    <label>左移動:</label>
+                                    <input type="text" id="key-p2-moveLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="moveLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右移動:</label>
+                                    <input type="text" id="key-p2-moveRight" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="moveRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ソフトドロップ:</label>
+                                    <input type="text" id="key-p2-softDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="softDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ハードドロップ:</label>
+                                    <input type="text" id="key-p2-hardDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="hardDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右回転:</label>
+                                    <input type="text" id="key-p2-rotateRight" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="rotateRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>左回転:</label>
+                                    <input type="text" id="key-p2-rotateLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="rotateLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD:</label>
+                                    <input type="text" id="key-p2-hold" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="hold">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD2:</label>
+                                    <input type="text" id="key-p2-hold2" class="key-input" readonly>
+                                    <button class="btn-rebind-p2" data-action="hold2">変更</button>
+                                </div>
+                            </div>
+
+                            <div class="settings-divider"></div>
+                            <h3 class="settings-section-title">🕹️ Player 2 ゲームパッド設定</h3>
+                            <div class="keybind-grid">
+                                <div class="keybind-item">
+                                    <label>左移動:</label>
+                                    <input type="text" id="gp-p2-moveLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="moveLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右移動:</label>
+                                    <input type="text" id="gp-p2-moveRight" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="moveRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ソフトドロップ:</label>
+                                    <input type="text" id="gp-p2-softDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="softDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>ハードドロップ:</label>
+                                    <input type="text" id="gp-p2-hardDrop" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="hardDrop">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>右回転:</label>
+                                    <input type="text" id="gp-p2-rotateRight" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="rotateRight">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>左回転:</label>
+                                    <input type="text" id="gp-p2-rotateLeft" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="rotateLeft">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD:</label>
+                                    <input type="text" id="gp-p2-hold" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="hold">変更</button>
+                                </div>
+                                <div class="keybind-item">
+                                    <label>HOLD2:</label>
+                                    <input type="text" id="gp-p2-hold2" class="key-input" readonly>
+                                    <button class="btn-rebind-gp-p2" data-action="hold2">変更</button>
+                                </div>
+                            </div>
+                        </div> <!-- End SubTab P2 -->
+                    </div> <!-- End Tab Controls -->
+
+                    <!-- Tab: Practice -->
+                    <div id="tab-practice" class="tab-pane">
+                        <h3 class="settings-section-title">🎓 プラクティス専用設定</h3>
+                        <div class="settings-grid">
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-practice-gravity">落下速度: <span
+                                            id="value-practice-gravity">1000</span>ms</label>
+                                    <span class="setting-hint">1段落下するまでの時間</span>
+                                </div>
+                                <input type="range" id="setting-practice-gravity" min="10" max="2000" step="10"
+                                    value="1000" class="range-input">
+                            </div>
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-practice-lock-delay">設置猶予: <span
+                                            id="value-practice-lock-delay">500</span>ms</label>
+                                    <span class="setting-hint">設置されるまでの待機時間</span>
+                                </div>
+                                <input type="range" id="setting-practice-lock-delay" min="0" max="2000" step="50"
+                                    value="500" class="range-input">
+                            </div>
+                            <div class="setting-item checkbox-item">
+                                <input type="checkbox" id="setting-practice-infinite-lock" class="checkbox-input">
+                                <label for="setting-practice-infinite-lock">設置猶予を無制限にする</label>
+                                <span class="setting-hint" style="margin-left: 10px;">(自動設置されなくなります)</span>
+                            </div>
+                            <div class="setting-item" style="margin-top: 20px;">
+                                <button class="btn-modal" id="reset-practice">プラクティス設定のみリセット</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Tab: Visuals & Sound -->
+                    <div id="tab-visuals" class="tab-pane">
+                        <h3 class="settings-section-title">🖼️ 背景設定</h3>
+                        <div class="background-settings">
+                            <div class="setting-item">
+                                <label>プリセット背景:</label>
+                                <div class="bg-presets">
+                                    <button class="btn-bg-preset active" data-bg-type="preset" data-bg-value="default"
+                                        title="デフォルト"></button>
+                                    <button class="btn-bg-preset" data-bg-type="preset" data-bg-value="cyber"
+                                        title="サイバーパンク"></button>
+                                    <button class="btn-bg-preset" data-bg-type="preset" data-bg-value="forest"
+                                        title="フォレスト"></button>
+                                    <button class="btn-bg-preset" data-bg-type="preset" data-bg-value="sunset"
+                                        title="サンセット"></button>
+                                    <button class="btn-bg-preset" data-bg-type="preset" data-bg-value="midnight"
+                                        title="ミッドナイト"></button>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label for="setting-bg-color">カスタムカラー:</label>
+                                <div class="custom-input-group">
+                                    <input type="color" id="setting-bg-color" value="#0a0e27" class="color-input">
+                                    <button class="btn-apply-custom" data-bg-type="color">この色を適用</button>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <label for="setting-bg-image">背景画像URL:</label>
+                                <div class="custom-input-group">
+                                    <input type="text" id="setting-bg-image" placeholder="https://example.com/image.jpg"
+                                        class="text-input">
+                                    <button class="btn-apply-custom" data-bg-type="image">この画像を適用</button>
+                                </div>
+                            </div>
+                            <div class="playlist-container" id="bg-playlist-container">
+                                <div class="playlist-header">
+                                    <span>カスタム背景リスト (最大5枚)</span>
+                                    <button class="btn-small" id="btn-add-bg-image">追加</button>
+                                </div>
+                                <div class="playlist-items" id="bg-playlist-items">
+                                    <!-- 背景アイテムがここに生成される -->
+                                </div>
+                                <input type="file" id="setting-bg-file" accept="image/*" style="display: none;">
+                            </div>
+                        </div>
+
+                        <div class="settings-divider"></div>
+                        <h3 class="settings-section-title">🔊 サウンド設定</h3>
+                        <div class="settings-grid">
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-menu-bgm-type">メニューBGMパターン:</label>
+                                </div>
+                                <select id="setting-menu-bgm-type" class="text-input">
+                                    <option value="synthwave">Synthwave (テクノ風)</option>
+                                    <option value="lofi" selected>Lo-fi Jazz (チル風)</option>
+                                    <option value="retro">8-bit Retro (レトロ風)</option>
+                                    <option value="happy">Happy Pop (明るめ)</option>
+                                    <option value="rave">Techno Rave (高揚感)</option>
+                                    <option value="tropical">Tropical Beach (南国風)</option>
+                                    <option value="custom">カスタムファイル</option>
+                                </select>
+                                <div class="custom-input-group" id="menu-bgm-file-group"
+                                    style="margin-top: 5px; display: none;">
+                                    <input type="file" id="setting-menu-bgm-file" accept="audio/*"
+                                        style="display: none;">
+                                    <button class="btn-apply-custom" id="btn-select-menu-bgm">ファイルを選択</button>
+                                    <span class="setting-hint" id="menu-bgm-filename"></span>
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-bgm-type">プレイ中BGMパターン:</label>
+                                </div>
+                                <select id="setting-bgm-type" class="text-input">
+                                    <option value="synthwave">Synthwave (テクノ風)</option>
+                                    <option value="lofi">Lo-fi Jazz (チル風)</option>
+                                    <option value="retro">8-bit Retro (レトロ風)</option>
+                                    <option value="happy">Happy Pop (明るめ)</option>
+                                    <option value="rave">Techno Rave (高揚感)</option>
+                                    <option value="tropical">Tropical Beach (南国風)</option>
+                                    <option value="custom">カスタムファイル</option>
+                                </select>
+                                <div class="playlist-container" id="game-bgm-playlist-container" style="display: none;">
+                                    <div class="playlist-header">
+                                        <span>カスタムプレイリスト (最大5曲)</span>
+                                        <button class="btn-apply-custom btn-small" id="btn-add-game-bgm">追加</button>
+                                    </div>
+                                    <div class="playlist-items" id="game-bgm-playlist-items">
+                                        <!-- プレイリストアイテムがここに生成される -->
+                                    </div>
+                                    <input type="file" id="setting-bgm-file-input" accept="audio/*"
+                                        style="display: none;">
+                                </div>
+                            </div>
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-bgm-volume">BGM音量: <span
+                                            id="value-bgm-volume">30</span>%</label>
+                                </div>
+                                <input type="range" id="setting-bgm-volume" min="0" max="100" step="1" value="30"
+                                    class="range-input">
+                            </div>
+                            <div class="setting-item checkbox-item">
+                                <input type="checkbox" id="setting-bgm-muted" class="checkbox-input">
+                                <label for="setting-bgm-muted">BGMミュート</label>
+                            </div>
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-se-volume">SE音量: <span id="value-se-volume">50</span>%</label>
+                                </div>
+                                <input type="range" id="setting-se-volume" min="0" max="100" step="1" value="50"
+                                    class="range-input">
+                            </div>
+                            <div class="setting-item checkbox-item">
+                                <input type="checkbox" id="setting-se-muted" class="checkbox-input">
+                                <label for="setting-se-muted">SEミュート</label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="keybind-message" id="keybind-message"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-modal" id="reset-records"
+                        style="margin-right: auto; background: rgba(255, 61, 0, 0.1); color: #ff3d00; border-color: rgba(255, 61, 0, 0.3);">記録をリセット</button>
+                    <button class="btn-modal" id="reset-defaults">すべてリセット</button>
+                    <button class="btn-modal btn-modal-primary" id="save-settings">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="game.js"></script>
+</body>
+
+</html>
