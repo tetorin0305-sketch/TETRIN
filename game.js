@@ -112,6 +112,25 @@ const I_KICKS = {
     '0-3': [[0, 0], [-1, 0], [2, 0], [-1, 2], [2, -1]]
 };
 
+// Seeded Random Number Generator (Xorshift)
+class SeededRNG {
+    constructor(seed) {
+        this.seed = seed || Date.now();
+    }
+
+    // Returns a random number between 0 (inclusive) and 1 (exclusive)
+    next() {
+        // Simple Xorshift implementation
+        let x = this.seed;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        this.seed = x;
+        // Map to 0-1
+        return (x >>> 0) / 4294967296;
+    }
+}
+
 // ========================================
 // キーバインド管理
 // ========================================
@@ -381,7 +400,8 @@ class GameSettings {
             customMenuPlaylist: [], // [{name: string, data: string}] IndexedDBから読み込まれる
             customGamePlaylist: [], // [{name: string, data: string}] IndexedDBから読み込まれる
             customBgPlaylist: [],   // [{name: string, data: string}] IndexedDBから読み込まれる
-            cpuLevel: 1
+            cpuLevel: 1,
+            playerName: 'ななし'
         };
         this.loadSettings();
     }
@@ -818,6 +838,13 @@ class SoundManager {
         setTimeout(() => this.playTone(400, 'sine', 0.005, 0.05, 0.05, 0.1, 0.3), 20);
     }
 
+    playLock() {
+        // 接地音 (Standardize to match Hard Drop's "Solid" feel)
+        const now = this.audioCtx ? this.audioCtx.currentTime : 0;
+        this.playTone(100, 'sine', 0.005, 0.1, 0.1, 0.2, 0.6);
+        setTimeout(() => this.playTone(400, 'sine', 0.005, 0.05, 0.05, 0.1, 0.3), 20);
+    }
+
     playClear(lines, isBTB = false) {
         if (lines === 4) {
             // TETRIS: T-Spinと同じ音にする
@@ -980,7 +1007,8 @@ class TetrisGame {
         this.currentX = 0;
         this.currentY = 0;
         this.currentRotation = 0;
-
+        this.winningSets = 1;
+        this.setsWon = 0;
         this.holdPiece = null;
         this.canHold = true;
 
@@ -1022,9 +1050,13 @@ class TetrisGame {
 
         this.keyBindings = new KeyBindings(this.prefix === 'p2-' ? 2 : 1);
 
+        // RNG
+        this.rng = new SeededRNG();
+
         this.particles = [];
         this.tspinTimeout = null;
         this.renTimeout = null;
+        this.syncedApm = '0.00'; // Added for online APM sync
         this.garbageTimer = 0;
         this.garbageInterval = 10000;
         this.isGarbageWarning = false;
@@ -1041,6 +1073,12 @@ class TetrisGame {
         this.lastDraggedCell = { row: -1, col: -1 };
         this.uiClickLocked = false;
 
+        // ランキング関連要素
+        this.rankingModal = document.getElementById('ranking-modal');
+        this.rankingListContainer = document.getElementById('ranking-list-container');
+        this.closeRankingBtn = document.getElementById('close-ranking');
+        this.showNationalRankingBtn = document.getElementById('show-national-ranking');
+
         this.menuNavigationEnabled = true;
         this.currentMenuIndex = 0;
         this.currentMenuItems = [];
@@ -1050,10 +1088,198 @@ class TetrisGame {
         this.applyBackground();
         this.updateMenuItems();
         this.setupEventListeners();
+        if (this.prefix === '') {
+            this.checkAutoJoin();
+        }
         this.setupSettingsUI();
 
         this.sounds.setBGMContext('menu');
         this.sounds.updateVolume();
+
+        // Online Game Start Listener (Main Instance Only)
+        if (this.prefix === '') {
+            window.addEventListener('networkGameStart', (e) => {
+                // 重複イベントを防ぐためのガード
+                const gameId = e.detail.roomId + '_' + e.detail.startTime;
+                if (this.lastGameStartId === gameId) return;
+                this.lastGameStartId = gameId;
+
+                console.log('Starting Online Game', e.detail);
+
+                // 既存のインスタンスをクリーンアップ
+                if (this.p1) this.p1.isRunning = false;
+                if (this.p2) this.p2.isRunning = false;
+
+                // Hide Lobby or Setup Menu
+                const lobbyMenu = document.getElementById('online-lobby-menu');
+                const versusSetupMenu = document.getElementById('versus-setup-menu');
+                if (lobbyMenu) lobbyMenu.style.display = 'none';
+                if (versusSetupMenu) versusSetupMenu.style.display = 'none';
+
+                // ゲームオーバー画面を即座に非表示にする
+                const p1GameOver = document.getElementById('p1-game-over-overlay');
+                const p2GameOver = document.getElementById('p2-game-over-overlay');
+                if (p1GameOver) p1GameOver.classList.remove('active');
+                if (p2GameOver) p2GameOver.classList.remove('active');
+
+                // 再戦ボタン等の状態をリセット
+                const restartBtn = document.getElementById('p1-restart-btn');
+                const backBtn = document.getElementById('p1-back-btn');
+                const statusEl = document.getElementById('p1-vs-status-message');
+                if (restartBtn) {
+                    restartBtn.disabled = false;
+                    restartBtn.style.opacity = '1';
+                }
+                if (backBtn) {
+                    backBtn.disabled = false;
+                    backBtn.style.opacity = '1';
+                }
+                if (statusEl) {
+                    statusEl.textContent = '';
+                }
+
+                // 1. Initialize P2 via toggleVersusMode FIRST
+                this.toggleVersusMode(true, 'online');
+
+                // Force Input Enabled for P1 (Fix for 2P freeze)
+                if (this.p1) this.p1.inputEnabled = true;
+
+                // 2. Sync Seed and Settings
+                const seed = e.detail.seed;
+                const settings = e.detail.settings || {};
+                const startLevel = settings.level || 1;
+                const winSets = settings.winningSets || 1;
+                if (seed) {
+                    // Main instance RNG (just in case)
+                    this.rng = new SeededRNG(seed);
+
+                    // Seed P1
+                    if (this.p1) {
+                        this.p1.rng = new SeededRNG(seed);
+                        this.p1.bag = [];
+                    }
+
+                    // Seed P2
+                    if (this.p2) {
+                        this.p2.rng = new SeededRNG(seed);
+                        this.p2.bag = [];
+                    }
+                    console.log(`Initialized RNG with seed: ${seed}`);
+
+                    // Setup Winning Sets
+                    if (this.p1) {
+                        this.p1.winningSets = winSets;
+                        this.p1.setsWon = 0;
+                        this.p1.reset();
+                        this.p1.isRunning = true;
+                        this.p1.gameOver = false;
+                    }
+                    if (this.p2) {
+                        this.p2.winningSets = winSets;
+                        this.p2.setsWon = 0;
+                        this.p2.reset();
+                        this.p2.isRunning = true;
+                        this.p2.gameOver = false;
+                    }
+                }
+
+                // 2. Setup Loading Overlay
+                const loadingOverlay = document.getElementById('versus-loading-overlay');
+                if (loadingOverlay) loadingOverlay.style.display = 'flex';
+
+                // 2.5 Explicitly Reset State Visuals BEFORE Countdown
+                console.log(`[${this.prefix || 'MAIN'}] networkGameStart: Resetting P1/P2 instances`);
+                [this.p1, this.p2].forEach((p, idx) => {
+                    if (p) {
+                        console.log(`[${this.prefix || 'MAIN'}] Resetting Player ${idx + 1}...`);
+                        p.reset();
+                        // Force clear canvas just in case context state is weird
+                        p.ctx.clearRect(0, 0, p.canvas.width, p.canvas.height);
+                        p.draw();
+
+                        // Hide NEXT queue to avoid spoilers/mismatch before proper start
+                        p.nextQueue = [];
+                        p.drawNext();
+                    }
+                });
+
+                // 3. Start Countdown (Synced)
+                const startTime = e.detail.startTime;
+                let delay = 0;
+
+                if (startTime) {
+                    const now = Date.now();
+                    delay = Math.max(0, startTime - now);
+                    console.log(`Synced start in ${delay}ms`);
+                } else {
+                    delay = 500; // Fallback
+                }
+
+                setTimeout(() => {
+                    // Hide loading overlay before countdown starts
+                    if (loadingOverlay) loadingOverlay.style.display = 'none';
+
+                    // Orchestrate P1 and P2 countdowns
+                    const p1Promise = this.p1 ? this.p1.startCountdown() : Promise.resolve();
+                    const p2Promise = this.p2 ? this.p2.startCountdown() : Promise.resolve();
+
+                    Promise.all([p1Promise, p2Promise]).then(() => {
+                        // Start both games with synced settings
+                        if (this.p1) this.p1.start('versus', 'normal', startLevel);
+                        if (this.p2) this.p2.start('versus', 'normal', startLevel);
+                    });
+                }, delay);
+            });
+
+            if (this.prefix === '') {
+                // Handle Opponent Disconnect
+                window.addEventListener('networkPlayerLeft', () => {
+                    if (this.gameMode === 'versus' && this.isRunning && !this.gameOver) {
+                        this.showMessage('OPPONENT LEFT!', 'warning');
+                        // Treat as win
+                        this.showGameOver(true);
+                    }
+                });
+
+                // Online Lobby List Update
+                window.addEventListener('networkLobbyUpdate', (e) => {
+                    this.updateLobbyUI(e.detail);
+                });
+
+                window.addEventListener('networkLobbyReturn', (e) => {
+                    const data = e.detail;
+                    const isOpponentInitiated = data && data.initiatorId && data.initiatorId !== window.networkManager.socket.id;
+
+                    if (isOpponentInitiated) {
+                        const statusEl = document.getElementById('p1-vs-status-message');
+                        if (statusEl) {
+                            statusEl.textContent = '対戦相手がルームに戻りました。';
+                            statusEl.style.color = 'var(--accent-primary)';
+                        }
+                        this.showMessage('対戦相手がルームに戻る選択をしました。', 'warning');
+                        // Give a moment for the user to read the message before transitioning
+                        setTimeout(() => {
+                            this.toggleVersusMode(false);
+                        }, 2000);
+                    } else {
+                        this.toggleVersusMode(false);
+                    }
+
+                    const lobbyMenu = document.getElementById('online-lobby-menu');
+                    if (lobbyMenu) lobbyMenu.style.display = 'flex';
+                });
+
+                window.addEventListener('networkOpponentRematch', () => {
+                    const statusEl = document.getElementById('p1-vs-status-message');
+                    // Only show if we haven't already requested a rematch ourselves
+                    if (statusEl && statusEl.textContent !== '対戦相手の選択を待っています...') {
+                        statusEl.textContent = '対戦相手が再戦を希望しています！';
+                        statusEl.style.color = 'var(--accent-success)';
+                    }
+                    this.showMessage('OPPONENT WANTS A REMATCH!', 'info');
+                });
+            }
+        }
 
         // ループを開始
         this.update();
@@ -1072,6 +1298,291 @@ class TetrisGame {
         // Line Clear Effect State
         this.isClearingLines = false;
         this.clearedWithEffectRows = [];
+
+        // Online Sync State
+        this.isOnlineRemote = false; // Is this instance a remote ghost?
+        this.onlineRoomId = null;
+
+        // Listener for remote events (only if this is p2 and online mode is active)
+        if (this.prefix === 'p2-') {
+            window.addEventListener('networkGameEvent', (e) => {
+                this.handleNetworkEvent(e.detail);
+            });
+        }
+    }
+
+    isOnlineHost() {
+        return window.networkManager && window.networkManager.isHost;
+    }
+
+    updateLobbyUI(data) {
+        const lobbyMenu = document.getElementById('online-lobby-menu');
+        const setupMenu = document.getElementById('versus-setup-menu');
+        const roomIdEl = document.getElementById('lobby-room-id');
+        const playerListEl = document.getElementById('lobby-player-list');
+        const winSetsInput = document.getElementById('lobby-win-sets-input');
+        const readyBtn = document.getElementById('lobby-ready-btn');
+        const startBtn = document.getElementById('lobby-start-btn');
+
+        if (!lobbyMenu || !playerListEl) return;
+
+        // Transition to lobby if not already there
+        if (lobbyMenu.style.display === 'none') {
+            const mainMenu = document.getElementById('main-mode-select');
+            const setupMenu = document.getElementById('versus-setup-menu');
+            if (mainMenu) mainMenu.style.display = 'none';
+            if (setupMenu) setupMenu.style.display = 'none';
+            const controlsGuide = document.querySelector('.controls-guide');
+            if (controlsGuide) controlsGuide.style.display = 'none';
+
+            lobbyMenu.style.display = 'flex';
+            this.currentMenuContext = 'online-lobby';
+            if (typeof this.updateMenuItems === 'function') this.updateMenuItems();
+        }
+
+        if (roomIdEl) roomIdEl.textContent = `ROOM: ${data.roomId}`;
+
+        if (winSetsInput) {
+            winSetsInput.value = data.settings.winningSets || 1;
+            winSetsInput.disabled = !this.isOnlineHost();
+        }
+
+        playerListEl.innerHTML = '';
+        const myId = window.networkManager.socket.id;
+
+        data.players.forEach(p => {
+            const isMe = p.id === myId;
+            const playerRow = document.createElement('div');
+            playerRow.style.display = 'flex';
+            playerRow.style.justifyContent = 'space-between';
+            playerRow.style.padding = '12px';
+            playerRow.style.background = isMe ? 'rgba(0, 240, 255, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+            playerRow.style.borderRadius = '10px';
+            playerRow.style.border = isMe ? '1px solid #00f0ff' : '1px solid #333';
+            playerRow.style.fontFamily = "'Orbitron', sans-serif";
+            playerRow.style.fontSize = "0.9em";
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = `${p.name}${isMe ? ' (YOU)' : ''}`;
+
+            const statusSpan = document.createElement('span');
+            if (p.index === 1) {
+                statusSpan.textContent = 'HOST';
+                statusSpan.style.color = '#00f0ff';
+            } else {
+                statusSpan.textContent = p.ready ? 'READY' : 'WAITING';
+                statusSpan.style.color = p.ready ? '#00ff41' : '#ff0055';
+            }
+
+            playerRow.appendChild(nameSpan);
+            playerRow.appendChild(statusSpan);
+            playerListEl.appendChild(playerRow);
+        });
+
+        const isHost = this.isOnlineHost();
+        if (readyBtn) {
+            readyBtn.style.display = isHost ? 'none' : 'block';
+            const myPlayer = data.players.find(p => p.id === myId);
+            if (myPlayer) {
+                readyBtn.textContent = myPlayer.ready ? '取り消し' : '準備完了';
+                readyBtn.style.background = myPlayer.ready ? '#555' : '#ff0055';
+            }
+        }
+        if (startBtn) {
+            startBtn.style.display = isHost ? 'block' : 'none';
+            const allReady = data.players.every(p => p.ready || p.index === 1);
+            startBtn.disabled = !allReady || data.players.length < 2;
+            startBtn.style.opacity = startBtn.disabled ? '0.5' : '1';
+        }
+    }
+
+    // ========================================
+    // ゲーム状態のリセット
+    // ========================================
+    reset() {
+        this.board = this.createBoard();
+        this.currentPiece = null;
+        this.holdPiece = null;
+        this.canHold = true;
+        this.nextQueue = [];
+        this.bag = [];
+        this.score = 0;
+        this.lines = 0;
+        this.level = this.startLevel || 1;
+        this.renCount = 0;
+        this.totalAttacks = 0;
+        this.totalReceivedAttacks = 0;
+        this.isBackToBack = false;
+        this.gameOver = false;
+        this.isPaused = false;
+        this.isRunning = false;
+        this.dropInterval = INITIAL_SPEED;
+
+        this.initializeNextQueue();
+        this.updateScore();
+        this.draw();
+        this.drawNext();
+        if (typeof this.drawHold === 'function') this.drawHold();
+
+        // 対戦モードの場合はスコア表示を初期化
+        if (this.gameMode === 'versus') {
+            this.updateVersusScoreDisplay();
+        }
+    }
+
+    updateVersusScoreDisplay() {
+        if (this.gameMode !== 'versus') return;
+
+        // P1とP2のインスタンスを特定（メインインスタンス経由）
+        const main = window.game;
+        if (!main) return;
+
+        const p1 = main.p1;
+        const p2 = main.p2;
+        if (!p1 || !p2) return;
+
+        const p1SetsEl = document.getElementById('vs-p1-sets');
+        const p2SetsEl = document.getElementById('vs-p2-sets');
+        const winTargetEl = document.getElementById('vs-win-target');
+
+        if (p1SetsEl) p1SetsEl.textContent = p1.setsWon;
+        if (p2SetsEl) p2SetsEl.textContent = p2.setsWon;
+        if (winTargetEl) winTargetEl.textContent = p1.winningSets;
+    }
+
+    handleNetworkEvent(data) {
+        if (!this.isRunning &&
+            data.type !== 'gameStart' &&
+            data.type !== 'rematch' &&
+            data.type !== 'ready' &&
+            data.type !== 'gameOver' &&
+            data.type !== 'gameWinSync') return;
+
+        try {
+            switch (data.type) {
+                case 'gameStart':
+                    this.reset();
+                    if (data.settings && data.settings.winningSets) {
+                        this.winningSets = data.settings.winningSets;
+                    }
+                    this.setsWon = 0;
+                    if (this.opponent) this.opponent.setsWon = 0;
+                    this.isRunning = true;
+                    this.isPaused = false;
+                    this.gameOver = false;
+                    if (this.readyOverlay) this.readyOverlay.style.display = 'none';
+                    this.startCountdown();
+                    break;
+                case 'rematch':
+                    if (window.networkManager) {
+                        window.networkManager.isRematchPending = true;
+                        window.networkManager.checkRematchStart();
+                    }
+                    break;
+                case 'ready':
+                    // Opponent is ready
+                    break;
+                case 'stateUpdate':
+                    this.currentX = data.payload.x;
+                    this.currentY = data.payload.y;
+                    this.currentRotation = data.payload.rotation;
+                    this.currentPiece = data.payload.piece; // Sync piece just in case
+                    if (data.payload.holdPiece !== undefined) this.holdPiece = data.payload.holdPiece;
+                    if (data.payload.nextQueue !== undefined) this.nextQueue = data.payload.nextQueue;
+                    if (data.payload.score !== undefined) this.score = data.payload.score;
+                    break;
+                case 'pieceLocked':
+                    if (data.payload.currentPiece !== undefined) {
+                        this.currentPiece = data.payload.currentPiece;
+                        this.currentX = data.payload.x;
+                        this.currentY = data.payload.y;
+                        this.currentRotation = data.payload.rotation;
+                    } else {
+                        this.spawnPiece();
+                    }
+                    this.board = data.payload.board;
+                    if (data.payload.garbageQueue !== undefined) {
+                        this.garbageQueue = data.payload.garbageQueue;
+                    }
+                    if (data.payload.score !== undefined) this.score = data.payload.score;
+                    if (data.payload.lines !== undefined) this.lines = data.payload.lines;
+                    if (data.payload.totalAttacks !== undefined) this.totalAttacks = data.payload.totalAttacks;
+                    if (data.payload.apm !== undefined) this.syncedApm = data.payload.apm;
+
+                    this.updateScore();
+                    this.draw();
+                    this.sounds.playLock();
+                    break;
+                case 'garbage':
+                    if (data.payload.amount > 0) {
+                        this.opponent.receiveGarbage(data.payload.amount);
+                        this.opponent.showMessage(`ATTACKED! ${data.payload.amount}`, 'warning');
+                    }
+                    break;
+                case 'gameOver':
+                    console.log(`[${this.prefix || 'MAIN'}] handleNetworkEvent: Recv gameOver. Syncing final stats.`);
+                    if (data.payload.score !== undefined) this.score = data.payload.score;
+                    if (data.payload.lines !== undefined) this.lines = data.payload.lines;
+                    if (data.payload.totalAttacks !== undefined) this.totalAttacks = data.payload.totalAttacks;
+                    if (data.payload.apm !== undefined) this.syncedApm = data.payload.apm;
+                    this.updateScore();
+                    this.showGameOver(false); // Ghost dies
+                    break;
+                case 'gameWinSync':
+                    console.log(`[${this.prefix || 'MAIN'}] handleNetworkEvent: Recv gameWinSync. Syncing final stats.`);
+                    if (data.payload.score !== undefined) this.score = data.payload.score;
+                    if (data.payload.lines !== undefined) this.lines = data.payload.lines;
+                    if (data.payload.totalAttacks !== undefined) this.totalAttacks = data.payload.totalAttacks;
+                    if (data.payload.apm !== undefined) this.syncedApm = data.payload.apm;
+                    this.updateScore();
+                    break;
+            }
+        } catch (e) {
+            console.error(`[${this.prefix || 'MAIN'}] handleNetworkEvent ERROR:`, e);
+        }
+    }
+
+    broadcastState() {
+        if (this.gameMode === 'versus' && this.inputEnabled && window.networkManager) {
+            const now = performance.now();
+            if (this.lastBroadcastTime && now - this.lastBroadcastTime < 50) {
+                return;
+            }
+            this.lastBroadcastTime = now;
+
+            window.networkManager.sendGameEvent('stateUpdate', {
+                x: this.currentX,
+                y: this.currentY,
+                rotation: this.currentRotation,
+                piece: this.currentPiece,
+                holdPiece: this.holdPiece // Added holdPiece sync
+            });
+        }
+    }
+
+    broadcastLock() {
+        if (this.gameMode === 'versus' && this.inputEnabled && window.networkManager) {
+            const timeInMinutes = this.elapsedTime / 60000;
+            const currentApm = timeInMinutes > 0 ? (this.totalAttacks / timeInMinutes).toFixed(2) : '0.00';
+
+            window.networkManager.sendGameEvent('pieceLocked', {
+                board: this.board,
+                score: this.score,
+                lines: this.lines,
+                garbageQueue: this.garbageQueue, // Sync the meter
+                lastEffect: this.lastEffect,
+                nextQueue: this.nextQueue, // Added nextQueue sync
+                holdPiece: this.holdPiece,  // Added holdPiece sync
+                apm: currentApm, // Added APM sync
+                totalAttacks: this.totalAttacks, // Added totalAttacks sync
+                // Add current piece info for immediate sync (Fix for queue desync)
+                currentPiece: this.currentPiece,
+                x: this.currentX,
+                y: this.currentY,
+                rotation: this.currentRotation
+            });
+            this.lastEffect = null;
+        }
     }
 
     loadHighScores() {
@@ -1172,7 +1683,8 @@ class TetrisGame {
     generateBag() {
         const bag = [...TETROMINO_TYPES];
         for (let i = bag.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
+            // Use seeded RNG
+            const j = Math.floor(this.rng.next() * (i + 1));
             [bag[i], bag[j]] = [bag[j], bag[i]];
         }
         return bag;
@@ -1216,7 +1728,8 @@ class TetrisGame {
 
     spawnPiece() {
         // 対戦・サバイバルモード: ピーススポーン時にガベージ処理（穴せり上がり）
-        if ((this.gameMode === 'versus' || this.gameMode === 'survival') && this.garbageQueue > 0) {
+        // オンラインのRemoteはネットワーク同期で盤面更新されるため、ここでは実行しない
+        if ((this.gameMode === 'versus' || this.gameMode === 'survival') && this.garbageQueue > 0 && !this.isOnlineRemote) {
             this.addGarbageLine();
         }
 
@@ -1237,8 +1750,12 @@ class TetrisGame {
         this.currentPieceHasUsedSoftDrop = false; // Reset soft drop usage flag
 
         if (this.checkCollision(this.currentX, this.currentY, this.currentRotation)) {
-            this.gameOver = true;
-            this.showGameOver();
+            // Online Remoteの場合、ローカルで勝手にGameOverにしない
+            // サーバーからの 'gameOver' イベントを待つ
+            if (!this.isOnlineRemote) {
+                this.gameOver = true;
+                this.showGameOver();
+            }
         }
 
 
@@ -1289,6 +1806,7 @@ class TetrisGame {
             this.currentX--;
             this.lastMoveWasRotation = false;
             this.sounds.playMove(); // SE
+            this.broadcastState(); // Broadcast
             // 移動前後のいずれかが接地状態であれば猶予をリセット（通算回数制限あり）
             const isOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
             if (wasOnGround || isOnGround) {
@@ -1301,8 +1819,10 @@ class TetrisGame {
                 } else if (isOnGround) {
                     // 既に上限に達した状態で接地したなら即座に固定
                     this.mergePiece();
+                    this.sounds.playLock();
                     if (!this.clearLines()) {
                         this.spawnPiece();
+                        this.broadcastLock();
                     }
                     this.lockDelayCounter = 0;
                 }
@@ -1318,6 +1838,7 @@ class TetrisGame {
             this.currentX++;
             this.lastMoveWasRotation = false;
             this.sounds.playMove(); // SE
+            this.broadcastState(); // Broadcast
             // 移動前後のいずれかが接地状態であれば猶予をリセット（通算回数制限あり）
             const isOnGround = this.checkCollision(this.currentX, this.currentY + 1, this.currentRotation);
             if (wasOnGround || isOnGround) {
@@ -1332,6 +1853,7 @@ class TetrisGame {
                     this.mergePiece();
                     if (!this.clearLines()) {
                         this.spawnPiece();
+                        this.broadcastLock();
                     }
                     this.lockDelayCounter = 0;
                 }
@@ -1347,6 +1869,7 @@ class TetrisGame {
             this.score += 1;
             this.updateScore();
             this.lastMoveWasRotation = false;
+            this.broadcastState(); // Broadcast
 
             // Mark Soft Drop usage (if this method call came from Soft Drop input, handled via caller, but moveDown is also gravity)
             // But wait, moveDown is called by Gravity too. We need to set the flag ONLY on input.
@@ -1370,6 +1893,7 @@ class TetrisGame {
         if (this.currentPiece === 'O') {
             // Oミノは物理的には回転しないが、AIの状態管理のために回転インデックスだけは更新する
             this.currentRotation = (this.currentRotation + direction + 4) % 4;
+            this.broadcastState();
             return true;
         }
 
@@ -1405,6 +1929,7 @@ class TetrisGame {
                     } else if (isOnGround) {
                         // 既に上限に達した状態で接地したなら即座に固定
                         this.mergePiece();
+                        this.sounds.playLock();
                         if (!this.clearLines()) {
                             this.spawnPiece();
                         }
@@ -1432,6 +1957,7 @@ class TetrisGame {
         this.mergePiece();
         if (!this.clearLines()) {
             this.spawnPiece();
+            this.broadcastLock();
         }
     }
 
@@ -1463,18 +1989,19 @@ class TetrisGame {
 
         this.drawHold();
         this.sounds.playMenuMove(); // SE
+        this.broadcastState();
     }
 
     // ========================================
     // ボード操作
     // ========================================
     mergePiece() {
+        if (!this.currentPiece) return;
+
         if (this.gameMode === 'practice' || this.gameMode === '40lines') {
             // Filter: If Soft Drop was used, we skip this piece's stats (per user request)
             if (!this.currentPieceHasUsedSoftDrop) {
                 // Check for Equivalent States (Symmetry) and find absolute minimum inputs
-                // e.g. I-piece Rot 1 vs Rot 3 might be same visual placement but different costs.
-                // We want to compare actual inputs against the CHEAPEST way to place the piece in that visual spot.
                 const equivalentStates = this.getEquivalentStates(this.currentPiece, this.currentX, this.currentY, this.currentRotation);
                 // Calculate for current state first
                 let minOptimal = this.calculateFinesse(this.currentPiece, this.currentRotation, this.currentX, this.currentY);
@@ -1483,11 +2010,6 @@ class TetrisGame {
                     // Start BFS for the alternative target state
                     const cost = this.calculateFinesse(this.currentPiece, state.r, state.x, state.y);
 
-                    // Note: BFS returns 0 if unreachable (empty queue), but calculateFinesse calculates from spawn.
-                    // If calculateFinesse returns 0, it means either spawn IS target, or unreachable. 
-                    // Assuming valid reachable states, we take the minimum non-zero (or zero if spawn is target).
-                    // Actually, if unreachable, we shouldn't use it.
-                    // But in Tetris, congruent states usually ARE reachable if the primary one is.
                     if (cost < minOptimal) {
                         minOptimal = cost;
                     }
@@ -1495,8 +2017,6 @@ class TetrisGame {
                 let optimalMoves = minOptimal;
 
                 // Wall Kick Success Logic (User Request): 
-                // If the piece was locked immediately after a Wall Kick, assume it's a successful "trick" placement 
-                // and count it as 100% efficient (Optimal = Actual), preventing rate drop.
                 if (this.lastMoveWasRotation && this.lastRotateWasKick) {
                     optimalMoves = this.currentPieceActualMoves;
                 }
@@ -1512,8 +2032,6 @@ class TetrisGame {
                 if (this.totalPieces > 0) {
                     this.optimizationRate = (this.perfectPieces / this.totalPieces) * 100;
 
-                    this.optimizationRate = (this.perfectPieces / this.totalPieces) * 100;
-
                     const optRateElem = document.getElementById('optimization-rate');
                     if (optRateElem) {
                         optRateElem.textContent = `${this.optimizationRate.toFixed(1)}%`;
@@ -1521,6 +2039,7 @@ class TetrisGame {
                 }
             }
         }
+
         const shape = TETROMINOS[this.currentPiece].shape[this.currentRotation];
         const color = TETROMINOS[this.currentPiece].color;
 
@@ -1590,6 +2109,55 @@ class TetrisGame {
         }
     }
 
+    createExplosion(boardX, boardY, color, count = 3) {
+        // DOM要素を使用したパーティクル生成（オーバーレイの上に表示するため）
+        // 画面中央を取得
+        const centerX = window.innerWidth / 2;
+        const centerY = window.innerHeight / 2;
+
+        const colors = ['#ff0055', '#00f0ff', '#ffeb3b', '#00ff41', '#b300ff', '#ff6d00'];
+
+        for (let i = 0; i < count; i++) {
+            const p = document.createElement('div');
+            const size = 5 + Math.random() * 8; // サイズを少し大きく (5-13px)
+            const particleColor = colors[Math.floor(Math.random() * colors.length)];
+
+            // スタイル設定
+            p.style.position = 'fixed';
+            p.style.left = `${centerX + (Math.random() - 0.5) * 50}px`; // 範囲も少しだけ緩和
+            p.style.top = `${centerY + (Math.random() - 0.5) * 50}px`;
+            p.style.width = `${size}px`;
+            p.style.height = `${size}px`;
+            p.style.backgroundColor = particleColor;
+            p.style.borderRadius = '50%';
+            p.style.zIndex = '100000'; // 最前面
+            p.style.pointerEvents = 'none'; // クリック阻害しない
+            p.style.boxShadow = `0 0 8px ${particleColor}`; // 光彩も少し戻す
+
+            document.body.appendChild(p);
+
+            // ランダムな方向へ拡散
+            const angle = Math.random() * Math.PI * 2;
+            const velocity = 100 + Math.random() * 300; // 移動距離
+            const tx = Math.cos(angle) * velocity;
+            const ty = Math.sin(angle) * velocity - 200; // 少し上向きに
+
+            // Web Animations APIでアニメーション
+            const animation = p.animate([
+                { transform: 'translate(0, 0) scale(1)', opacity: 1 },
+                { transform: `translate(${tx}px, ${ty}px) scale(0)`, opacity: 0 }
+            ], {
+                duration: 200 + Math.random() * 300, // 0.2~0.5秒（さらに短縮）
+                easing: 'cubic-bezier(0, .9, .57, 1)',
+                fill: 'forwards'
+            });
+
+            animation.onfinish = () => {
+                p.remove();
+            };
+        }
+    }
+
     updateParticles() {
         for (let i = this.particles.length - 1; i >= 0; i--) {
             const p = this.particles[i];
@@ -1604,19 +2172,33 @@ class TetrisGame {
     }
 
     drawParticles() {
-        this.ctx.globalCompositeOperation = 'lighter';
         this.particles.forEach(p => {
+            // 影を追加
+            this.ctx.shadowColor = p.color;
+            this.ctx.shadowBlur = 15;
+            this.ctx.shadowOffsetX = 0;
+            this.ctx.shadowOffsetY = 0;
+
+            // パーティクル本体
             this.ctx.fillStyle = p.color;
-            this.ctx.globalAlpha = p.life;
+            this.ctx.globalAlpha = Math.min(1.0, p.life * 1.5); // より不透明に
             this.ctx.beginPath();
             this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
             this.ctx.fill();
+
+            // 白い縁取りを追加（より目立つように）
+            this.ctx.strokeStyle = 'rgba(255, 255, 255, ' + (p.life * 0.8) + ')';
+            this.ctx.lineWidth = 2;
+            this.ctx.stroke();
         });
+
+        // リセット
         this.ctx.globalAlpha = 1.0;
-        this.ctx.globalCompositeOperation = 'source-over';
+        this.ctx.shadowBlur = 0;
     }
 
     clearLines() {
+        this.lastEffect = null; // Reset effect data
         // 1. Check if lines exist (without modifying board yet)
         const hasLines = this.board.some(row => row.every(cell => cell !== 0));
         if (!hasLines) {
@@ -1691,6 +2273,15 @@ class TetrisGame {
         if (this.isBackToBack && (linesCleared === 4 || finalTSpin)) {
             this.showBTBNotification();
         }
+
+        // Store effect for networking
+        this.lastEffect = {
+            tspin: finalTSpin,
+            lines: linesCleared,
+            ren: predictedRenCount - 1,
+            pc: isPerfectClear,
+            btb: this.isBackToBack
+        };
 
         // 4. Setup effect state
         this.isClearingLines = true;
@@ -1829,14 +2420,15 @@ class TetrisGame {
                 this.score += renBonus;
             }
 
-            this.totalAttacks += attack;
-
+            // パーフェクトクリア判定
             const isPerfectClear = this.board.every(row => row.every(cell => cell === 0));
             if (isPerfectClear) {
                 this.score += 3000 * scoreLevel;
-                this.totalAttacks += 10;
-                attack += 10;
+                // PC火力を固定10ラインにする（テトリスPCやRENPCでも10固定）
+                attack = 10;
             }
+
+            this.totalAttacks += attack;
 
             // 相殺
             if ((this.gameMode === 'versus' || this.gameMode === 'survival') && this.garbageQueue > 0 && attack > 0) {
@@ -1850,7 +2442,14 @@ class TetrisGame {
 
             // 対戦相手にガベージを送信
             if (this.opponent && attack > 0) {
+                // Local update (for visual feedback or local versus)
                 this.opponent.receiveGarbage(attack);
+
+                // Online Broadcast
+                if (window.networkManager && this.gameMode === 'versus' && this.prefix !== 'p2-') {
+                    window.networkManager.sendGameEvent('garbage', { amount: attack });
+                }
+
                 this.showMessage(`ATTACK! ${attack} LINES`, 'info');
             }
 
@@ -1886,6 +2485,7 @@ class TetrisGame {
         this.isClearingLines = false;
         this.clearedWithEffectRows = [];
         this.spawnPiece();
+        this.broadcastLock(); // Broadcast AFTER clear and spawn
     }
 
 
@@ -2114,11 +2714,15 @@ class TetrisGame {
         if (this.getElement('lines')) this.getElement('lines').textContent = this.lines;
         if (this.getElement('ren')) this.getElement('ren').textContent = Math.max(0, this.renCount - 1);
         if (this.getElement('time')) this.getElement('time').textContent = this.formatTime(this.elapsedTime);
+        if (this.getElement('garbage-pending')) this.getElement('garbage-pending').textContent = this.totalAttacks;
 
         // APMの表示
         const sentApmElement = this.getElement('apm');
         const recvApmElement = this.getElement('recv-apm');
-        if (this.elapsedTime > 0) {
+
+        if (this.isOnlineRemote) {
+            if (sentApmElement) sentApmElement.textContent = this.syncedApm;
+        } else if (this.elapsedTime > 0) {
             const timeInMinutes = this.elapsedTime / 60000;
             if (sentApmElement) {
                 sentApmElement.textContent = (this.totalAttacks / timeInMinutes).toFixed(2);
@@ -2184,10 +2788,26 @@ class TetrisGame {
             notification.textContent = 'FINISH!';
         }
         this.showGameOver(true);
+
+        // 全国ランキングに送信
+        if (this.gameMode === '40lines') {
+            this.submitScoreToSupabase('40lines', this.elapsedTime);
+        } else if (this.gameMode === 't20') {
+            this.submitScoreToSupabase('t20', this.elapsedTime);
+        }
     }
 
     showGameOver(isWin = false) {
         if (!this.isRunning) return;
+
+        // ライン消去アニメーション中の場合、強制的にスコアを確定させる
+        if (this.isClearingLines) {
+            this.finalizeClearLines();
+            // finalizeClearLines 内、またはそこから呼ばれる処理で既に game over 状態になった場合は中断
+            if (!this.isRunning) return;
+        }
+
+        console.log(`[${this.prefix || 'MAIN'}] showGameOver: isWin=${isWin}, isRunning=${this.isRunning}`);
 
         this.isRunning = false;
         this.gameOver = true;
@@ -2199,48 +2819,134 @@ class TetrisGame {
         }
         this.sounds.stopBGM();
 
+        // Sound only for local player
+        if (!this.isOnlineRemote) {
+            if (isWin) {
+                this.sounds.playVictory();
+            } else {
+                this.sounds.playGameOver();
+            }
+        }
+
         if (isWin) {
-            this.sounds.playVictory();
-        } else {
-            this.sounds.playGameOver();
+            // ... score submission if needed ...
+        }
+
+        // 全国ランキングに送信
+        if (this.gameMode === 'marathon') {
+            this.submitScoreToSupabase('marathon', this.score);
+        } else if (this.gameMode === 'ren4') {
+            this.submitScoreToSupabase('ren4', this.maxRen);
         }
 
         // 対戦モード用ロジック
         if (this.gameMode === 'versus') {
+            console.log(`[${this.prefix || 'MAIN'}] showGameOver (Versus Logic Start)`);
             const overlay = this.getElement('game-over-overlay');
             const gameOverTitle = this.getElement('game-over-title');
             const statsContainer = this.getElement('final-stats-container');
             const shareXBtn = this.getElement('share-x-btn');
 
+            console.log(`[${this.prefix || 'MAIN'}] Elements: overlay=${!!overlay}, title=${!!gameOverTitle}`);
+
             if (isWin) {
+                this.setsWon++;
+                console.log(`[${this.prefix || 'MAIN'}] Set Won! Current sets: ${this.setsWon}/${this.winningSets}`);
+
                 if (gameOverTitle) {
-                    gameOverTitle.textContent = 'YOU WIN!';
+                    gameOverTitle.textContent = this.setsWon >= this.winningSets ? 'MATCH WINNER!' : 'SET WON!';
                     gameOverTitle.style.color = '#00f0ff';
                     gameOverTitle.style.fontSize = '3rem';
                 }
+
+                // Online Broadcast: I won this set
+                if (window.networkManager && this.gameMode === 'versus' && !this.isOnlineRemote) {
+                    this.updateScore(); // 最新の状態に更新 (APM等)
+                    const timeInMinutes = this.elapsedTime / 60000;
+                    const currentApm = timeInMinutes > 0 ? (this.totalAttacks / timeInMinutes).toFixed(2) : '0.00';
+                    window.networkManager.sendGameEvent('gameWinSync', {
+                        score: this.score,
+                        lines: this.lines,
+                        totalAttacks: this.totalAttacks,
+                        apm: currentApm
+                    });
+                }
             } else {
                 if (gameOverTitle) {
-                    gameOverTitle.textContent = 'YOU LOSE';
+                    gameOverTitle.textContent = (this.opponent && this.opponent.setsWon + 1 >= this.winningSets) ? 'MATCH LOST' : 'SET LOST';
                     gameOverTitle.style.color = '#ff3d00';
                     gameOverTitle.style.fontSize = '3rem';
                 }
-                // 自分が負けた場合、相手を勝たせる
+
+                // Online Broadcast: I lost this set
+                if (window.networkManager && this.gameMode === 'versus' && !this.isOnlineRemote) {
+                    console.log(`[${this.prefix || 'MAIN'}] Broadcasting gameOver (Set Lost) with final stats`);
+                    this.updateScore(); // 最新の状態に更新 (APM等)
+                    const timeInMinutes = this.elapsedTime / 60000;
+                    const currentApm = timeInMinutes > 0 ? (this.totalAttacks / timeInMinutes).toFixed(2) : '0.00';
+
+                    window.networkManager.sendGameEvent('gameOver', {
+                        setsWon: this.setsWon,
+                        score: this.score,
+                        lines: this.lines,
+                        totalAttacks: this.totalAttacks,
+                        apm: currentApm
+                    });
+                }
+
+                // 自分が負けた場合、相手を勝たせる (Local/CPU/OnlineRemote Ghost)
                 if (this.opponent && this.opponent.isRunning) {
+                    console.log(`[${this.prefix || 'MAIN'}] Forcing opponent set win`);
                     this.opponent.showGameOver(true);
                 }
             }
 
-            if (statsContainer) statsContainer.innerHTML = ''; // 統計は非表示
-            if (shareXBtn) shareXBtn.style.display = 'none'; // シェアボタンも非表示
+            // グローバルなセットスコア表示を更新
+            this.updateVersusScoreDisplay();
 
-            overlay.classList.add('active');
+            // マッチ終了判定
+            const matchOver = this.setsWon >= this.winningSets || (this.opponent && this.opponent.setsWon >= this.winningSets);
 
-            // 対戦モード終了時はメニュー操作を有効化 (CPU以外)
-            if (this.inputEnabled) {
-                this.menuNavigationEnabled = true;
-                this.currentMenuContext = 'versus-gameover';
-                this.updateMenuItems();
-                this.updateMenuFocus();
+            if (statsContainer) {
+                const p1Sets = this.prefix === '' ? this.setsWon : (this.opponent ? this.opponent.setsWon : 0);
+                const p2Sets = this.prefix !== '' ? this.setsWon : (this.opponent ? this.opponent.setsWon : 0);
+                statsContainer.innerHTML = `
+                    <div style="font-size: 2rem; font-family: 'Orbitron', sans-serif; color: #fff; margin: 10px 0;">
+                        ${p1Sets} - ${p2Sets}
+                    </div>
+                `;
+            }
+
+            if (shareXBtn) shareXBtn.style.display = 'none';
+
+            // ボタンの表示制御 (マッチ終了時のみ表示)
+            const restartBtn = this.getElement('restart-btn');
+            const backBtn = this.getElement('back-btn');
+            if (restartBtn) restartBtn.style.display = matchOver ? 'block' : 'none';
+            if (backBtn) backBtn.style.display = matchOver ? 'block' : 'none';
+
+            if (overlay) {
+                overlay.classList.add('active');
+            }
+
+            if (matchOver) {
+                // マッチ全体の終了
+                if (this.inputEnabled) {
+                    this.menuNavigationEnabled = true;
+                    this.currentMenuContext = 'versus-gameover';
+                    setTimeout(() => {
+                        this.updateMenuItems();
+                        this.updateMenuFocus();
+                    }, 50);
+                }
+            } else {
+                // 次のセットへ (自動リスタート)
+                this.showMessage('NEXT SET STARTS IN 3 SECONDS...', 'info');
+                setTimeout(() => {
+                    if (this.gameMode === 'versus' && !matchOver) {
+                        this.start('versus', 'normal', this.level);
+                    }
+                }, 3000);
             }
             return;
         }
@@ -2317,16 +3023,25 @@ class TetrisGame {
                 isNewRecord = true;
             }
         } else if (this.gameMode === 'survival') {
-            if (this.survivalType === 'serial') {
-                if (this.elapsedTime > this.bestSurvivalSerial) {
-                    this.bestSurvivalSerial = this.elapsedTime;
-                    isNewRecord = true;
+            // レベル10スタートの場合のみ記録を保存
+            if (this.startLevel >= 10) {
+                const modeStr = (this.survivalType === 'serial') ? 'survival_serial' : 'survival_normal';
+
+                if (this.survivalType === 'serial') {
+                    if (this.elapsedTime > this.bestSurvivalSerial) {
+                        this.bestSurvivalSerial = this.elapsedTime;
+                        isNewRecord = true;
+                    }
+                } else {
+                    if (this.elapsedTime > this.bestSurvival) {
+                        this.bestSurvival = this.elapsedTime;
+                        isNewRecord = true;
+                    }
                 }
+                // 全国ランキングへの送信 (タイムを送信)
+                this.submitScoreToSupabase(modeStr, this.elapsedTime);
             } else {
-                if (this.elapsedTime > this.bestSurvival) {
-                    this.bestSurvival = this.elapsedTime;
-                    isNewRecord = true;
-                }
+                console.log('Survival score info: Not recorded as start level < 10');
             }
         }
 
@@ -2338,14 +3053,14 @@ class TetrisGame {
 
                 // 記録更新の紙吹雪演出
                 const rect = overlay.getBoundingClientRect();
-                for (let i = 0; i < 5; i++) {
+                for (let i = 0; i < 10; i++) {
                     setTimeout(() => {
                         this.createExplosion(
                             Math.random() * BOARD_WIDTH,
                             Math.random() * VISIBLE_HEIGHT + (BOARD_HEIGHT - VISIBLE_HEIGHT),
                             '#ff0055'
                         );
-                    }, i * 100);
+                    }, i * 40);
                 }
             }, 300);
         }
@@ -2413,7 +3128,13 @@ class TetrisGame {
         this.pollGamepad();
 
         if (!this.isRunning || this.gameOver || this.isPaused) {
-            // ゲームオーバー時やポーズ時もゲームパッド入力を継続的に検出するため、ループを継続
+            // ゲームオーバー時やポーズ時もパーティクルを更新・描画
+            this.updateParticles();
+            this.draw();
+            this.drawNext();
+            this.drawParticles();
+
+            // ゲームパッド入力を継続的に検出するため、ループを継続
             requestAnimationFrame((t) => this.update(t));
             return;
         }
@@ -2439,6 +3160,15 @@ class TetrisGame {
         if (this.isRunning && !this.isPaused) {
             this.elapsedTime += deltaTime;
             this.updateScore();
+        }
+
+        if (this.isOnlineRemote) {
+            this.updateParticles();
+            this.draw();
+            this.drawNext();
+            this.drawParticles();
+            requestAnimationFrame((t) => this.update(t));
+            return;
         }
 
         this.handleInputs(deltaTime); // 追加
@@ -2476,7 +3206,9 @@ class TetrisGame {
         }
 
         // 対戦モード(CPU)のガベージ処理
-        if (this.gameMode === 'versus' && !this.isPaused && !this.inputEnabled) {
+        // オンライン対戦の相手（Remote）の場合は、ネットワーク同期（pieceLocked）で盤面が送られてくるので、
+        // ここで勝手にガベージを生成してはいけない。
+        if (this.gameMode === 'versus' && !this.isPaused && !this.inputEnabled && !this.isOnlineRemote) {
             this.garbageTimer += deltaTime;
             if (this.garbageTimer > 500) {
                 if (this.garbageQueue > 0) this.addGarbageLine();
@@ -2500,7 +3232,7 @@ class TetrisGame {
                 this.garbageTimer = 0;
                 this.isGarbageWarning = false;
                 this.garbageDelayBonus = 0; // ボーナスは1回のせり上がりで消費される
-                const minInterval = this.survivalType === 'serial' ? 4000 : 2000;
+                const minInterval = this.survivalType === 'serial' ? 4000 : 1000;
                 this.garbageInterval = Math.max(minInterval, 10000 - (this.level - 1) * 500 + this.garbageDelayBonus);
             }
 
@@ -2511,8 +3243,8 @@ class TetrisGame {
                 this.level = newLevel;
                 this.showMessage(`LEVEL UP: ${this.level}`, 'info');
                 // せり上がり間隔も即座に再計算（ボーナスも維持）
-                // 通常サバイバル: 最低2秒、課金穴サバイバル: 最低5秒
-                const minInterval = this.survivalType === 'serial' ? 4000 : 2000;
+                // 通常サバイバル: 最低2秒、課金穴サバイバル: 最低4秒
+                const minInterval = this.survivalType === 'serial' ? 4000 : 1000;
                 this.garbageInterval = Math.max(minInterval, 10000 - (this.level - 1) * 500 + this.garbageDelayBonus);
             }
         }
@@ -2538,8 +3270,10 @@ class TetrisGame {
                 }
 
                 this.mergePiece();
+                this.sounds.playLock();
                 if (!this.clearLines()) {
                     this.spawnPiece();
+                    this.broadcastLock();
                 }
                 this.lockDelayCounter = 0;
             } else {
@@ -2568,6 +3302,7 @@ class TetrisGame {
                     this.mergePiece();
                     if (!this.clearLines()) {
                         this.spawnPiece();
+                        this.broadcastLock();
                     }
                     this.lockDelayCounter = 0;
                 }
@@ -2707,6 +3442,11 @@ class TetrisGame {
         this.holdPiece = null;
         this.canHold = true;
         this.initializeNextQueue();
+
+        // 対戦モードの場合はスコア表示を初期化
+        if (mode === 'versus') {
+            this.updateVersusScoreDisplay();
+        }
 
         // 入力状態をクリア (前回プレイ時の入力が残らないようにする)
         this.keysState = {};
@@ -2880,7 +3620,15 @@ class TetrisGame {
     pollGamepad() {
         if (!this.inputEnabled) return;
         const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-        const targets = Array.from(gamepads).filter(gp => gp !== null);
+        let targets = [];
+
+        // Specific gamepad index assigned to this instance
+        if (this.gamepadIndex !== null) {
+            if (gamepads[this.gamepadIndex]) targets = [gamepads[this.gamepadIndex]];
+        } else {
+            // Main instance or unassigned: poll all available
+            targets = Array.from(gamepads).filter(gp => gp !== null);
+        }
 
         const actions = ['moveLeft', 'moveRight', 'softDrop', 'hardDrop', 'rotateRight', 'rotateLeft', 'hold', 'hold2', 'pause', 'reset', 'returnToTitle'];
         const currentButtons = {};
@@ -2947,7 +3695,7 @@ class TetrisGame {
         }
 
         // メニューナビゲーション
-        if (!this.isRunning && this.menuNavigationEnabled) {
+        if ((!this.isRunning || this.isPaused) && this.menuNavigationEnabled) {
             const up = currentButtons['hardDrop'];
             const down = currentButtons['softDrop'];
             const left = currentButtons['moveLeft'];
@@ -2958,13 +3706,43 @@ class TetrisGame {
             if (!this.lastGamepadMenuInput) {
                 this.lastGamepadMenuInput = { up: false, down: false, left: false, right: false, confirm: false, back: false };
             }
+            // Initialize hold counters
+            if (!this.menuHoldCounters) {
+                this.menuHoldCounters = { up: 0, down: 0, left: 0, right: 0 };
+            }
 
-            if (up && !this.lastGamepadMenuInput.up) this.navigateMenu('up');
-            if (down && !this.lastGamepadMenuInput.down) this.navigateMenu('down');
-            if (left && !this.lastGamepadMenuInput.left) this.navigateMenu('left');
-            if (right && !this.lastGamepadMenuInput.right) this.navigateMenu('right');
+            const MENU_DAS = 10;
+            const MENU_ARR = 2; // Fast scroll
+
+            const directions = [
+                { key: 'up', val: up },
+                { key: 'down', val: down },
+                { key: 'left', val: left },
+                { key: 'right', val: right }
+            ];
+
+            directions.forEach(d => {
+                if (d.val) {
+                    const count = this.menuHoldCounters[d.key];
+                    if (count === 0) {
+                        console.log(`[GAMEPAD MENU] First press: ${d.key}, counter: ${count}`);
+                        this.navigateMenu(d.key);
+                    } else if (count >= MENU_DAS) {
+                        if ((count - MENU_DAS) % MENU_ARR === 0) {
+                            console.log(`[GAMEPAD MENU] Repeat: ${d.key}, counter: ${count}`);
+                            this.navigateMenu(d.key);
+                        }
+                    }
+                    this.menuHoldCounters[d.key]++;
+                } else {
+                    this.menuHoldCounters[d.key] = 0;
+                }
+            });
+
+            // Confirm/Back are still single-press
             if (confirm && !this.lastGamepadMenuInput.confirm) this.activateMenuItem();
             if (back && !this.lastGamepadMenuInput.back) this.goBack();
+
 
             // ゲームオーバー時の特殊アクション
             if (this.gameOver) {
@@ -3005,6 +3783,12 @@ class TetrisGame {
         if (!this.prefix && (this.p1 || this.p2)) {
             // ただし、もし万が一メニュー操作などがメインに必要ならここで分岐するが、
             // 現状は P1 インスタンスがキーを奪っているのでメインは無視して良い
+            return;
+        }
+
+        // モーダル表示中は全てのゲーム操作を中断
+        if ((this.rankingModal && this.rankingModal.classList.contains('active')) ||
+            (this.getElement('settings-modal') && this.getElement('settings-modal').classList.contains('active'))) {
             return;
         }
 
@@ -3098,6 +3882,18 @@ class TetrisGame {
 
 
     pause(isInternal = false) {
+        // メインインスタンスかつ対戦モード中の場合、p1 インスタンスに委譲
+        if (!isInternal && !this.prefix && this.p1) {
+            return this.p1.pause(false);
+        }
+
+        // Online mode: forbid pause
+        const isOnlineMatch = this.gameMode === 'versus' && (this.isOnlineRemote || (this.opponent && this.opponent.isOnlineRemote));
+        if (!isInternal && isOnlineMatch) {
+            this.showMessage('PAUSE DISABLED IN ONLINE MATCH', 'warning');
+            return;
+        }
+
         // 対戦モードの場合、相手も一緒にポーズする
         if (!isInternal && this.gameMode === 'versus' && this.opponent) {
             this.opponent.pause(true);
@@ -3107,18 +3903,32 @@ class TetrisGame {
         this.sounds.playMenuClick(); // SE
 
         if (this.isPaused) {
+            // Reset gamepad menu counters to prevent hypersensitive navigation
+            this.menuHoldCounters = { up: 0, down: 0, left: 0, right: 0 };
+            this.lastGamepadMenuInput = null;
             this.sounds.stopBGM();
         } else if (this.isRunning) {
+            // Reset gamepad menu counters when unpausing
+            this.menuHoldCounters = { up: 0, down: 0, left: 0, right: 0 };
+            this.lastGamepadMenuInput = null;
             this.sounds.startBGM();
         }
         if (!this.isPaused && this.isRunning) {
             this.lastTime = performance.now();
-            requestAnimationFrame((t) => this.update(t));
         }
     }
 
     async quickReset(isInternal = false) {
+        // メインインスタンスかつ対戦モード中の場合、p1 インスタンスに委譲
+        if (!isInternal && !this.prefix && this.p1) {
+            return this.p1.quickReset(false);
+        }
 
+        // Online mode: forbid reset
+        if (!isInternal && window.networkManager && this.gameMode === 'versus') {
+            this.showMessage('RESET DISABLED IN ONLINE MATCH', 'warning');
+            return;
+        }
 
         // 対戦モードの場合、相手も一緒にリセットする
         if (!isInternal && this.gameMode === 'versus' && this.opponent) {
@@ -3361,7 +4171,7 @@ class TetrisGame {
         // サブタイトルのリセット
         const subtitle = this.getElement('subtitle');
         if (subtitle) {
-            subtitle.textContent = '次の5個を見通せ、HOLDで戦略を';
+            subtitle.textContent = 'テトリスの講師 理想のテトリス';
         }
 
         // サバイバルパネルの非表示
@@ -3377,6 +4187,10 @@ class TetrisGame {
             this.countdownElement.classList.remove('active');
             this.countdownElement.innerHTML = '';
         }
+
+        // Reset gamepad menu counters
+        this.menuHoldCounters = { up: 0, down: 0, left: 0, right: 0 };
+        this.lastGamepadMenuInput = null;
 
         // メニューナビゲーションを有効化
         this.menuNavigationEnabled = true;
@@ -3396,7 +4210,16 @@ class TetrisGame {
 
         this.currentMenuItems = [];
 
-        if (gameOverlay && gameOverlay.style.display !== 'none') {
+        if (this.rankingModal && this.rankingModal.classList.contains('active')) {
+            // ランキングモーダルを最優先
+            this.currentMenuContext = 'ranking';
+            this.currentMenuItems = Array.from(this.rankingModal.querySelectorAll('.btn-ranking-nav'))
+                .filter(el => el.offsetParent !== null);
+        } else if (this.getElement('settings-modal') && this.getElement('settings-modal').classList.contains('active')) {
+            // 設定モーダル (現在は独自の実装だが、コンテキストをセットして他をブロック)
+            this.currentMenuContext = 'settings';
+            this.currentMenuItems = []; // 設定モーダル内のナビゲーションは別の場所で処理されている可能性があるが、他をブロックするためにセット
+        } else if (gameOverlay && gameOverlay.style.display !== 'none') {
             // タイトル画面
             if (mainMode && mainMode.style.display !== 'none') {
                 this.currentMenuContext = 'main';
@@ -3417,10 +4240,17 @@ class TetrisGame {
             } else if (versusSetupMenu && versusSetupMenu.style.display !== 'none') {
                 this.currentMenuContext = 'versus-setup';
                 const vsTypeOptions = Array.from(versusSetupMenu.querySelectorAll('.mode-option'));
-                const cpuLevelItem = [versusSetupMenu.querySelector('#cpu-level-item')];
+
+                // CPUレベルスライダーは、親要素が表示されている場合のみ追加
+                const cpuLevelItem = versusSetupMenu.querySelector('#cpu-level-item');
+                const cpuSettingsContainer = versusSetupMenu.querySelector('#cpu-settings-container');
+                const cpuLevelItems = (cpuLevelItem && cpuSettingsContainer && cpuSettingsContainer.offsetParent !== null)
+                    ? [cpuLevelItem]
+                    : [];
+
                 const actionButtons = Array.from(versusSetupMenu.querySelectorAll('.btn-start'))
                     .filter(el => el.offsetParent !== null);
-                this.currentMenuItems = [...vsTypeOptions, ...cpuLevelItem, ...actionButtons]
+                this.currentMenuItems = [...vsTypeOptions, ...cpuLevelItems, ...actionButtons]
                     .filter(el => el && el.offsetParent !== null);
             } else if (this.getElement('practice-mode-select') && this.getElement('practice-mode-select').style.display !== 'none') {
                 this.currentMenuContext = 'practice';
@@ -3437,10 +4267,19 @@ class TetrisGame {
                 const sprintMenu = this.getElement('sprint-mode-select');
                 this.currentMenuItems = Array.from(sprintMenu.querySelectorAll('.btn-start'))
                     .filter(el => el && el.offsetParent !== null);
+            } else if (this.getElement('online-lobby-menu') && this.getElement('online-lobby-menu').style.display !== 'none') {
+                this.currentMenuContext = 'online-lobby';
+                const lobbyMenu = this.getElement('online-lobby-menu');
+                // レベル入力 + 準備ボタン or 開始ボタン + 退出ボタン
+                const levelInput = [lobbyMenu.querySelector('#lobby-win-sets-input')];
+                const actionButtons = Array.from(lobbyMenu.querySelectorAll('.btn-start'))
+                    .filter(el => el && el.offsetParent !== null);
+                this.currentMenuItems = [...levelInput, ...actionButtons]
+                    .filter(el => el && el.offsetParent !== null);
             }
         } else if (this.currentMenuContext === 'versus-gameover') {
             // 対戦モードゲームオーバー画面
-            const p1Overlay = document.getElementById('p1-game-over-overlay');
+            const p1Overlay = this.getElement('game-over-overlay');
             console.log(`[DEBUG][${this.prefix || 'MAIN'}] updateMenuItems: P1 Overlay Found:${!!p1Overlay}`);
             if (p1Overlay) {
                 const buttons = Array.from(p1Overlay.querySelectorAll('.btn-restart'));
@@ -3470,6 +4309,12 @@ class TetrisGame {
             this.currentMenuIndex = 0;
         }
 
+        // Update Controls Guide Visibility
+        const controlsGuide = document.querySelector('.controls-guide');
+        if (controlsGuide) {
+            controlsGuide.style.display = (this.currentMenuContext === 'main') ? 'block' : 'none';
+        }
+
         this.updateMenuFocus();
     }
 
@@ -3491,7 +4336,234 @@ class TetrisGame {
             return;
         }
 
-        if (direction === 'up') {
+        // 特別なコンテキストの処理を優先
+        if (this.currentMenuContext === 'ranking') {
+            const closeBtnIndex = 0; // × ボタン (modal-close)
+            const firstTabIndex = 1;
+            const lastTabIndex = 6; // タブが6個あるため (1:40L, 2:Mara, 3:T20, 4:REN, 5:SN, 6:SS)
+            const rankingContainer = document.getElementById('ranking-list-container');
+            const scrollAmount = 50;
+
+            if (direction === 'left' || direction === 'right') {
+                // タブ列 (1-4) にいる場合のみ左右で切り替え
+                if (this.currentMenuIndex >= firstTabIndex) {
+                    if (direction === 'left') {
+                        this.currentMenuIndex = this.currentMenuIndex - 1;
+                        if (this.currentMenuIndex < firstTabIndex) this.currentMenuIndex = lastTabIndex;
+                    } else {
+                        this.currentMenuIndex = this.currentMenuIndex + 1;
+                        if (this.currentMenuIndex > lastTabIndex) this.currentMenuIndex = firstTabIndex;
+                    }
+                }
+            } else if (direction === 'up') {
+                // タブにいる場合: スクロールアップ -> 最上部なら「×」ボタンへ
+                if (this.currentMenuIndex >= firstTabIndex) {
+                    if (rankingContainer && rankingContainer.scrollTop > 0) {
+                        rankingContainer.scrollBy({ top: -scrollAmount, behavior: 'instant' }); // Smoothだと操作感が悪いのでinstant
+                    } else {
+                        this.currentMenuIndex = closeBtnIndex;
+                    }
+                }
+                // 「×」ボタンにいる場合: 何もしない (これ以上上がない)
+            } else if (direction === 'down') {
+                // 「×」ボタンにいる場合: タブへ移動
+                if (this.currentMenuIndex === closeBtnIndex) {
+                    this.currentMenuIndex = firstTabIndex;
+                } else if (this.currentMenuIndex >= firstTabIndex) {
+                    // タブにいる場合: スクロールダウン (無限スクロール)
+                    if (rankingContainer) {
+                        rankingContainer.scrollBy({ top: scrollAmount, behavior: 'instant' });
+                    }
+                }
+            }
+        } else if (this.currentMenuContext === 'dpc-menu') {
+            // DPC練習メニュー: 2列グリッド (ピース8個 + 戻るボタン)
+            // 0:T, 1:O
+            // 2:S, 3:Z
+            // 4:I, 5:J
+            // 6:L, 7:OSZ
+            // 8:戻る
+            const colCount = 2;
+            const pieceCount = 8;
+            const backBtnIndex = 8;
+
+            if (direction === 'left') {
+                if (this.currentMenuIndex < pieceCount) {
+                    // 同一行の左へ (偶数なら右端へ、奇数なら左へ)
+                    if (this.currentMenuIndex % 2 === 0) this.currentMenuIndex++;
+                    else this.currentMenuIndex--;
+                }
+            } else if (direction === 'right') {
+                if (this.currentMenuIndex < pieceCount) {
+                    // 同一行の右へ
+                    if (this.currentMenuIndex % 2 === 0) this.currentMenuIndex++;
+                    else this.currentMenuIndex--;
+                }
+            } else if (direction === 'up') {
+                if (this.currentMenuIndex === backBtnIndex) {
+                    this.currentMenuIndex = 6; // OSZかLか迷うが、とりあえずL(6)へ
+                } else if (this.currentMenuIndex >= colCount) {
+                    this.currentMenuIndex -= colCount;
+                } else {
+                    this.currentMenuIndex = backBtnIndex; // ループして戻るボタンへ
+                }
+            } else if (direction === 'down') {
+                if (this.currentMenuIndex === backBtnIndex) {
+                    this.currentMenuIndex = 0; // ループして最初へ
+                } else if (this.currentMenuIndex + colCount < pieceCount) {
+                    this.currentMenuIndex += colCount;
+                } else {
+                    this.currentMenuIndex = backBtnIndex; // 戻るボタンへ
+                }
+            }
+        } else if (this.currentMenuContext === 'survival') {
+            // サバイバルメニュー: レベル選択(2個) + モードボタン(2個) + 戻るボタン(1個)
+            // 0: Level 1, 1: Level 10
+            // 2: 通常サバイバル, 3: 課金穴サバイバル
+            // 4: 戻る
+            const levelOptionCount = 2;
+            const modeButtonStart = 2;
+            const modeButtonCount = 2;
+            const backButtonIndex = 4;
+
+            if (direction === 'left' || direction === 'right') {
+                // レベル選択ラジオボタン間を左右キーで移動
+                if (this.currentMenuIndex < levelOptionCount) {
+                    if (direction === 'left') {
+                        this.currentMenuIndex = 0; // Level 1へ
+                    } else {
+                        this.currentMenuIndex = 1; // Level 10へ
+                    }
+                    // ラジオボタンを選択
+                    const currentItem = this.currentMenuItems[this.currentMenuIndex];
+                    if (currentItem && currentItem.classList.contains('level-option')) {
+                        const radio = currentItem.querySelector('input[type="radio"]');
+                        if (radio) {
+                            radio.checked = true;
+                            radio.dispatchEvent(new Event('change'));
+                        }
+                    }
+                }
+            } else if (direction === 'up') {
+                if (this.currentMenuIndex === backButtonIndex) {
+                    // 戻るボタンから上へ: モードボタンの最後へ
+                    this.currentMenuIndex = modeButtonStart + modeButtonCount - 1;
+                } else if (this.currentMenuIndex >= modeButtonStart && this.currentMenuIndex < modeButtonStart + modeButtonCount) {
+                    // モードボタンから上へ: レベル選択へ
+                    this.currentMenuIndex = 0;
+                } else if (this.currentMenuIndex < levelOptionCount) {
+                    // レベル選択から上へ: 戻るボタンへ (ループ)
+                    this.currentMenuIndex = backButtonIndex;
+                }
+            } else if (direction === 'down') {
+                if (this.currentMenuIndex < levelOptionCount) {
+                    // レベル選択から下へ: モードボタンへ
+                    this.currentMenuIndex = modeButtonStart;
+                } else if (this.currentMenuIndex >= modeButtonStart && this.currentMenuIndex < modeButtonStart + modeButtonCount) {
+                    // モードボタン内を移動
+                    this.currentMenuIndex++;
+                    if (this.currentMenuIndex >= modeButtonStart + modeButtonCount) {
+                        // モードボタンの最後から下へ: 戻るボタンへ
+                        this.currentMenuIndex = backButtonIndex;
+                    }
+                } else if (this.currentMenuIndex === backButtonIndex) {
+                    // 戻るボタンから下へ: レベル選択へ (ループ)
+                    this.currentMenuIndex = 0;
+                }
+            }
+        } else if (this.currentMenuContext === 'versus-setup') {
+            // 対戦モード設定メニュー: 動的な構成に対応
+            // モードオプション(2個) + CPUレベル(0または1個) + アクションボタン(2個)
+            const currentItem = this.currentMenuItems[this.currentMenuIndex];
+
+            if (direction === 'left' || direction === 'right') {
+                // モードオプション間を左右キーで移動
+                if (currentItem && currentItem.classList.contains('mode-option')) {
+                    const modeOptions = this.currentMenuItems.filter(item => item.classList.contains('mode-option'));
+                    const maxIndex = modeOptions.length - 1;
+
+                    if (direction === 'left') {
+                        this.currentMenuIndex = Math.max(0, this.currentMenuIndex - 1);
+                    } else {
+                        this.currentMenuIndex = Math.min(maxIndex, this.currentMenuIndex + 1);
+                    }
+
+                    // ラジオボタンを選択
+                    const newItem = this.currentMenuItems[this.currentMenuIndex];
+                    if (newItem && newItem.classList.contains('mode-option')) {
+                        const radio = newItem.querySelector('input[type="radio"]');
+                        if (radio) {
+                            radio.checked = true;
+                            radio.dispatchEvent(new Event('change'));
+                            // メニューアイテムを更新(CPUレベルスライダーの表示/非表示が変わる可能性があるため)
+                            setTimeout(() => {
+                                this.updateMenuItems();
+                            }, 50); // CSSアニメーションの完了を待つ
+                        }
+                    }
+                } else if (currentItem && currentItem.id === 'cpu-level-item') {
+                    // CPUレベルスライダーを左右キーで調整
+                    const slider = currentItem.querySelector('#cpu-level-slider');
+                    if (slider) {
+                        const step = parseInt(slider.step) || 1;
+                        const val = parseInt(slider.value);
+                        if (direction === 'left') slider.value = Math.max(parseInt(slider.min), val - step);
+                        else slider.value = Math.min(parseInt(slider.max), val + step);
+                        slider.dispatchEvent(new Event('input'));
+                    }
+                }
+            } else if (direction === 'up') {
+                // 上キー: 前のセクションへ移動
+                if (currentItem && currentItem.classList.contains('mode-option')) {
+                    // モードオプションから上へ: 戻るボタンへ (ループ)
+                    this.currentMenuIndex = this.currentMenuItems.length - 1;
+                } else if (currentItem && currentItem.id === 'cpu-level-item') {
+                    // CPUレベルから上へ: モードオプション(最初)へ
+                    this.currentMenuIndex = 0;
+                } else if (currentItem && currentItem.classList.contains('btn-start')) {
+                    // アクションボタンから上へ
+                    // CPUレベルスライダーがあればそこへ、なければモードオプションへ
+                    const hasCpuLevel = this.currentMenuItems.some(item => item.id === 'cpu-level-item');
+                    if (hasCpuLevel) {
+                        this.currentMenuIndex = this.currentMenuItems.findIndex(item => item.id === 'cpu-level-item');
+                    } else {
+                        this.currentMenuIndex = 0;
+                    }
+                } else {
+                    this.currentMenuIndex--;
+                    if (this.currentMenuIndex < 0) {
+                        this.currentMenuIndex = this.currentMenuItems.length - 1;
+                    }
+                }
+            } else if (direction === 'down') {
+                // 下キー: 次のセクションへ移動
+                if (currentItem && currentItem.classList.contains('mode-option')) {
+                    // モードオプションから下へ: CPUレベルまたは試合開始ボタンへ
+                    const hasCpuLevel = this.currentMenuItems.some(item => item.id === 'cpu-level-item');
+                    if (hasCpuLevel) {
+                        this.currentMenuIndex = this.currentMenuItems.findIndex(item => item.id === 'cpu-level-item');
+                    } else {
+                        // CPUレベルがない場合は試合開始ボタンへ
+                        this.currentMenuIndex = this.currentMenuItems.findIndex(item => item.classList.contains('btn-start'));
+                    }
+                } else if (currentItem && currentItem.id === 'cpu-level-item') {
+                    // CPUレベルから下へ: 試合開始ボタンへ
+                    this.currentMenuIndex = this.currentMenuItems.findIndex(item => item.classList.contains('btn-start'));
+                } else if (currentItem && currentItem.classList.contains('btn-start')) {
+                    // アクションボタン内を移動
+                    this.currentMenuIndex++;
+                    if (this.currentMenuIndex >= this.currentMenuItems.length) {
+                        // 戻るボタンから下へ: モードオプションへ (ループ)
+                        this.currentMenuIndex = 0;
+                    }
+                } else {
+                    this.currentMenuIndex++;
+                    if (this.currentMenuIndex >= this.currentMenuItems.length) {
+                        this.currentMenuIndex = 0;
+                    }
+                }
+            }
+        } else if (direction === 'up') {
             this.currentMenuIndex--;
             if (this.currentMenuIndex < 0) {
                 this.currentMenuIndex = this.currentMenuItems.length - 1;
@@ -3502,9 +4574,19 @@ class TetrisGame {
                 this.currentMenuIndex = 0;
             }
         } else if (direction === 'left' || direction === 'right') {
+            if (this.currentMenuContext === 'versus-gameover') {
+                // 対戦終了画面では左右キーでも上下移動と同じ挙動にする（操作性向上のため）
+                if (direction === 'left') { // Up behavior
+                    this.currentMenuIndex--;
+                    if (this.currentMenuIndex < 0) this.currentMenuIndex = this.currentMenuItems.length - 1;
+                } else { // Down behavior
+                    this.currentMenuIndex++;
+                    if (this.currentMenuIndex >= this.currentMenuItems.length) this.currentMenuIndex = 0;
+                }
+            }
             // ラジオボタンまたはスライダーの場合は左右で操作
             const currentItem = this.currentMenuItems[this.currentMenuIndex];
-            if (currentItem.classList.contains('level-option') || currentItem.classList.contains('mode-option')) {
+            if (currentItem && (currentItem.classList.contains('level-option') || currentItem.classList.contains('mode-option'))) {
                 const radio = currentItem.querySelector('input[type="radio"]');
                 if (radio) {
                     radio.checked = true;
@@ -3519,6 +4601,14 @@ class TetrisGame {
                 else currentItem.value = Math.min(parseInt(currentItem.max), val + step);
                 // イベントを発火させて表示を更新
                 currentItem.dispatchEvent(new Event('input'));
+            } else if (currentItem.type === 'number') {
+                const val = parseInt(currentItem.value) || 0;
+                const min = parseInt(currentItem.min) || 0;
+                const max = parseInt(currentItem.max) || 100;
+                if (direction === 'left') currentItem.value = Math.max(min, val - 1);
+                else currentItem.value = Math.min(max, val + 1);
+                currentItem.dispatchEvent(new Event('input'));
+                currentItem.dispatchEvent(new Event('change'));
             } else if (currentItem.id === 'cpu-level-item') {
                 const slider = currentItem.querySelector('#cpu-level-slider');
                 if (slider) {
@@ -3577,6 +4667,11 @@ class TetrisGame {
             document.getElementById('back-to-main-from-practice').click();
         } else if (this.currentMenuContext === 'dpc-menu') {
             document.getElementById('back-to-practice-from-dpc').click();
+        } else if (this.currentMenuContext === 'ranking') {
+            if (this.closeRankingBtn) this.closeRankingBtn.click();
+        } else if (this.currentMenuContext === 'online-lobby') {
+            const backBtn = document.getElementById('lobby-back-btn');
+            if (backBtn) backBtn.click();
         }
     }
 
@@ -3622,6 +4717,12 @@ class TetrisGame {
 
     handleInputs(deltaTime) {
         if (this.uiClickLocked) return;
+
+        // モーダル表示中は物理入力をブロック
+        if ((this.rankingModal && this.rankingModal.classList.contains('active')) ||
+            (this.getElement('settings-modal') && this.getElement('settings-modal').classList.contains('active'))) {
+            return;
+        }
 
 
 
@@ -3696,6 +4797,12 @@ class TetrisGame {
     // ========================================
     handleMouseDown(e) {
         if (this.gameMode !== 'practice') return;
+
+        // モーダル表示中は操作をブロック
+        if ((this.rankingModal && this.rankingModal.classList.contains('active')) ||
+            (this.getElement('settings-modal') && this.getElement('settings-modal').classList.contains('active'))) {
+            return;
+        }
 
         const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -3802,11 +4909,33 @@ class TetrisGame {
             }
 
             if (action) {
+                const isModalActive = (this.rankingModal && this.rankingModal.classList.contains('active')) ||
+                    (this.getElement('settings-modal') && this.getElement('settings-modal').classList.contains('active'));
+
+                // モーダル表示中はメニューナビゲーションのみを許可し、他のグローバルアクションやゲームプレイを完全にブロック
+                if (isModalActive) {
+                    if (e.type === 'keydown') {
+                        if (action === 'rotateRight') this.activateMenuItem();
+                        else if (action === 'rotateLeft') this.goBack();
+                        else if (['moveLeft', 'moveRight', 'softDrop', 'hardDrop'].includes(action)) {
+                            const navMap = {
+                                'moveLeft': 'left',
+                                'moveRight': 'right',
+                                'softDrop': 'down',
+                                'hardDrop': 'up'
+                            };
+                            if (navMap[action]) this.navigateMenu(navMap[action]);
+                        }
+                    }
+                    return;
+                }
+
                 // Reset / Return to Title / Pause (Keyboard parity with gamepad)
                 // Global match actions should only be handled by the main instance (prefix === '')
                 if (e.type === 'keydown' && !e.repeat) {
                     if (action === 'reset' || action === 'returnToTitle' || action === 'pause') {
-                        if (this.prefix !== '') return;
+                        // メインインスタンス、または P1 インスタンスのみがグローバルアクションを処理
+                        if (this.prefix !== '' && this.prefix !== 'p1-') return;
                         this.handleButtonDown(action);
                         return;
                     }
@@ -3814,7 +4943,9 @@ class TetrisGame {
 
                 // Sub-instances (p1-/p2-) should NOT handle menu navigation or global pause/reset
                 if (this.prefix !== '') {
-                    if (!this.isRunning || this.isPaused || this.gameOver || this.isCountingDown) return;
+                    // Exception: Allow sub-instance to navigate menu if it's in Game Over state and Navigation is enabled (Versus Result Screen)
+                    const isVersusResult = (this.gameOver && this.menuNavigationEnabled);
+                    if (!isVersusResult && (!this.isRunning || this.isPaused || this.gameOver || this.isCountingDown)) return;
                 }
 
                 // Menu Navigation
@@ -3823,6 +4954,12 @@ class TetrisGame {
                         if (action === 'rotateRight') this.activateMenuItem();
                         else if (action === 'rotateLeft') this.goBack();
                         else if (['moveLeft', 'moveRight', 'softDrop', 'hardDrop'].includes(action)) {
+                            const navMap = {
+                                'moveLeft': 'left',
+                                'moveRight': 'right',
+                                'softDrop': 'down',
+                                'hardDrop': 'up'
+                            };
                             if (navMap[action]) this.navigateMenu(navMap[action]);
                         }
                     }
@@ -3898,373 +5035,550 @@ class TetrisGame {
             });
         });
 
-        // 以下、UIボタンのイベントリスナー
-        const bindButton = (id, handler) => {
-            const btn = document.getElementById(id);
-            if (btn) {
-                // クローンしてリスナー重複を排除
-                const newBtn = btn.cloneNode(true);
-                btn.parentNode.replaceChild(newBtn, btn);
-                newBtn.addEventListener('click', () => {
-                    if (this.uiClickLocked) return;
-                    this.sounds.playMenuClick();
-                    handler();
-                    newBtn.blur();
-                });
-            }
-        };
-
-        // メニューボタン
-        bindButton('start-marathon', () => this.start('marathon'));
-        bindButton('start-40lines', () => this.start('40lines'));
-        bindButton('start-t20', () => this.start('t20'));
-        bindButton('start-ren4', () => this.start('ren4'));
-        bindButton('start-survival-normal', () => {
-            const selectedLevel = parseInt(document.querySelector('input[name="survival-level"]:checked').value);
-            this.start('survival', 'normal', selectedLevel);
-        });
-        bindButton('start-survival-serial', () => {
-            const selectedLevel = parseInt(document.querySelector('input[name="survival-level"]:checked').value);
-            this.start('survival', 'serial', selectedLevel);
-        });
-        // bindButton('start-practice', () => this.start('practice')); // Removed to use submenu
-
-        // コントロールボタン
-        bindButton('pause-btn', () => this.pause());
-        bindButton('vs-pause-btn', () => this.pause());
-        bindButton('quick-reset-btn', () => this.quickReset());
-        bindButton('vs-quick-reset-btn', () => this.quickReset());
-        bindButton('return-title-btn', () => {
-            const optPanel = document.getElementById('practice-info-panel');
-            if (optPanel) optPanel.style.display = 'none';
-            this.menuNavigationEnabled = true;
-            this.returnToTitle();
-        });
-        bindButton('vs-return-title-btn', () => {
-            const optPanel = document.getElementById('practice-info-panel');
-            if (optPanel) optPanel.style.display = 'none';
-            this.menuNavigationEnabled = true;
-            this.returnToTitle();
-        });
-
-        // ゲームオーバー画面のボタン
-        const returnTitleGameoverBtn = document.getElementById('return-title-gameover-btn');
-        if (returnTitleGameoverBtn) {
-            const newBtn = returnTitleGameoverBtn.cloneNode(true);
-            returnTitleGameoverBtn.parentNode.replaceChild(newBtn, returnTitleGameoverBtn);
-            newBtn.addEventListener('click', () => {
-                try {
-                    this.sounds.playMenuClick();
-                } catch (e) {
-                    console.error('Sound play failed:', e);
+        // 以下、UIボタンのイベントリスナー (メインインスタンスのみ)
+        if (this.prefix === '') {
+            const bindButton = (id, handler) => {
+                const btn = document.getElementById(id);
+                if (btn) {
+                    // クローンしてリスナー重複を排除
+                    const newBtn = btn.cloneNode(true);
+                    btn.parentNode.replaceChild(newBtn, btn);
+                    newBtn.addEventListener('click', () => {
+                        if (this.uiClickLocked) return;
+                        this.sounds.playMenuClick();
+                        handler();
+                        newBtn.blur();
+                    });
                 }
+            };
+
+            // メニューボタン
+            bindButton('start-marathon', () => this.start('marathon'));
+            bindButton('start-40lines', () => this.start('40lines'));
+            bindButton('start-t20', () => this.start('t20'));
+            bindButton('start-ren4', () => this.start('ren4'));
+            bindButton('start-survival-normal', () => {
+                const selectedLevel = parseInt(document.querySelector('input[name="survival-level"]:checked').value);
+                this.start('survival', 'normal', selectedLevel);
+            });
+            bindButton('start-survival-serial', () => {
+                const selectedLevel = parseInt(document.querySelector('input[name="survival-level"]:checked').value);
+                this.start('survival', 'serial', selectedLevel);
+            });
+            // bindButton('start-practice', () => this.start('practice')); // Removed to use submenu
+
+            // コントロールボタン
+            bindButton('pause-btn', () => this.pause());
+            bindButton('vs-pause-btn', () => this.pause());
+            bindButton('quick-reset-btn', () => this.quickReset());
+            bindButton('vs-quick-reset-btn', () => this.quickReset());
+            bindButton('return-title-btn', () => {
                 const optPanel = document.getElementById('practice-info-panel');
                 if (optPanel) optPanel.style.display = 'none';
                 this.menuNavigationEnabled = true;
                 this.returnToTitle();
             });
-        }
-
-        bindButton('restart-btn', () => this.quickReset());
-        bindButton('share-x-btn', () => this.shareToX());
-
-        // 設定ボタン
-        const openSettings = () => {
-            this.loadKeyBindingsToUI();
-            this.loadGameSettingsToUI();
-            document.getElementById('settings-modal').classList.add('active');
-            // 対戦中の場合は両インスタンスを一時停止
-            if (this.p1 && this.p2) {
-                if (!this.p1.isPaused) this.p1.pause(true);
-                if (!this.p2.isPaused) this.p2.pause(true);
-            }
-            this.isPaused = true;
-        };
-        bindButton('settings-btn', openSettings);
-        bindButton('vs-settings-btn', openSettings);
-
-        // e-sportsメニュー制御
-        const showEsportsBtn = document.getElementById('show-esports-menu');
-        const esportsMenu = document.getElementById('esports-mode-select');
-        const backToMainFromEsportsBtn = document.getElementById('back-to-main-from-esports');
-
-        // メインメニューの定義（共通で使用）
-        const mainMenu = document.getElementById('main-mode-select');
-        const controlsGuide = document.querySelector('.controls-guide');
-
-        if (showEsportsBtn && esportsMenu && mainMenu && backToMainFromEsportsBtn) {
-            const newShow = showEsportsBtn.cloneNode(true);
-            showEsportsBtn.parentNode.replaceChild(newShow, showEsportsBtn);
-
-            const newBack = backToMainFromEsportsBtn.cloneNode(true);
-            backToMainFromEsportsBtn.parentNode.replaceChild(newBack, backToMainFromEsportsBtn);
-
-            newShow.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                mainMenu.style.display = 'none';
-                if (controlsGuide) controlsGuide.style.display = 'none';
-                esportsMenu.style.display = 'flex'; // gridではなくflexで縦並び
-                this.currentMenuContext = 'esports';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
+            bindButton('vs-return-title-btn', () => {
+                const optPanel = document.getElementById('practice-info-panel');
+                if (optPanel) optPanel.style.display = 'none';
+                this.menuNavigationEnabled = true;
+                this.returnToTitle();
             });
 
-            newBack.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                esportsMenu.style.display = 'none';
-                mainMenu.style.display = 'flex';
-                if (controlsGuide) controlsGuide.style.display = 'block';
-                this.currentMenuContext = 'main';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-        }
-
-        // Sprintメニュー制御
-        const showSprintBtn = document.getElementById('show-sprint-menu');
-        const sprintMenu = document.getElementById('sprint-mode-select');
-        const backToEsportsFromSprintBtn = document.getElementById('back-to-esports-from-sprint');
-
-        if (showSprintBtn && sprintMenu && esportsMenu && backToEsportsFromSprintBtn) {
-            const newShow = showSprintBtn.cloneNode(true);
-            showSprintBtn.parentNode.replaceChild(newShow, showSprintBtn);
-
-            const newBack = backToEsportsFromSprintBtn.cloneNode(true);
-            backToEsportsFromSprintBtn.parentNode.replaceChild(newBack, backToEsportsFromSprintBtn);
-
-            newShow.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                esportsMenu.style.display = 'none';
-                sprintMenu.style.display = 'flex';
-                this.currentMenuContext = 'sprint';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            newBack.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                sprintMenu.style.display = 'none';
-                esportsMenu.style.display = 'flex';
-                this.currentMenuContext = 'esports';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-        }
-        const showSurvivalBtn = document.getElementById('show-survival-menu');
-        const survivalMenu = document.getElementById('survival-mode-select');
-        const backToMainBtn = document.getElementById('back-to-main');
-
-        if (showSurvivalBtn && survivalMenu && mainMenu && backToMainBtn) {
-            const newShow = showSurvivalBtn.cloneNode(true);
-            showSurvivalBtn.parentNode.replaceChild(newShow, showSurvivalBtn);
-
-            const newBack = backToMainBtn.cloneNode(true);
-            backToMainBtn.parentNode.replaceChild(newBack, backToMainBtn);
-
-            newShow.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                // サバイバルは e-sports メニューから遷移するようになった
-                if (esportsMenu) esportsMenu.style.display = 'none';
-                else mainMenu.style.display = 'none'; // フォールバック
-
-                if (controlsGuide) controlsGuide.style.display = 'none';
-
-                survivalMenu.style.display = 'flex';
-                this.currentMenuContext = 'survival';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            newBack.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                survivalMenu.style.display = 'none';
-                // サバイバルからは e-sports メニューに戻る
-                if (esportsMenu) esportsMenu.style.display = 'flex';
-                else mainMenu.style.display = 'flex';
-
-                this.currentMenuContext = 'esports'; // ここも e-sports に戻す
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-        }
-
-        // Versus Mode Setup Menu Control
-        const showVersusSetupBtn = document.getElementById('show-versus-setup');
-        const versusSetupMenu = document.getElementById('versus-setup-menu');
-        const startVersusMatchBtn = document.getElementById('start-versus-match');
-        const backToMainFromVersusBtn = document.getElementById('back-to-main-from-versus');
-        const cpuLevelSlider = document.getElementById('cpu-level-slider');
-        const cpuLevelDisplay = document.getElementById('cpu-level-display');
-
-        if (showVersusSetupBtn && versusSetupMenu && mainMenu && startVersusMatchBtn && backToMainFromVersusBtn) {
-            // クローンしてリスナー重複排除
-            const newShow = showVersusSetupBtn.cloneNode(true);
-            showVersusSetupBtn.parentNode.replaceChild(newShow, showVersusSetupBtn);
-
-            const newStart = startVersusMatchBtn.cloneNode(true);
-            startVersusMatchBtn.parentNode.replaceChild(newStart, startVersusMatchBtn);
-
-            const newBack = backToMainFromVersusBtn.cloneNode(true);
-            backToMainFromVersusBtn.parentNode.replaceChild(newBack, backToMainFromVersusBtn);
-
-            newShow.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                mainMenu.style.display = 'none';
-                if (controlsGuide) controlsGuide.style.display = 'none';
-                versusSetupMenu.style.display = 'flex';
-                this.currentMenuContext = 'versus-setup';
-                this.currentMenuIndex = 0;
-
-                // 保存されたCPUレベルをUIに反映
-                const savedCpuLevel = this.settings.get('cpuLevel') || 1;
-                if (cpuLevelSlider) cpuLevelSlider.value = savedCpuLevel;
-                if (cpuLevelDisplay) cpuLevelDisplay.textContent = savedCpuLevel;
-
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            newStart.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                versusSetupMenu.style.display = 'none';
-                this.toggleVersusMode(true);
-            });
-
-            newBack.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                versusSetupMenu.style.display = 'none';
-                mainMenu.style.display = 'flex';
-                if (controlsGuide) controlsGuide.style.display = 'block';
-                this.currentMenuContext = 'main';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            if (cpuLevelSlider && cpuLevelDisplay) {
-                cpuLevelSlider.addEventListener('input', (e) => {
-                    const val = !!e.target ? e.target.value : cpuLevelSlider.value;
-                    cpuLevelDisplay.textContent = val;
-                    // 設定を即座に保存
-                    this.settings.set('cpuLevel', parseInt(val));
-                    this.settings.saveSettings();
-                });
-            }
-        }
-
-        // Practice Mode Menu Control
-        const showPracticeBtn = document.getElementById('start-practice');
-        const practiceMenu = document.getElementById('practice-mode-select');
-        const backToMainFromPracticeBtn = document.getElementById('back-to-main-from-practice');
-        const startFreePracticeBtn = document.getElementById('start-practice-free');
-        const openDpcMenuBtn = document.getElementById('btn-open-dpc-menu');
-
-        // DPC Submenu elements
-        const dpcMenu = document.getElementById('dpc-mode-select');
-        const backToPracticeFromDpcBtn = document.getElementById('back-to-practice-from-dpc');
-        const startDpcTBtn = document.getElementById('start-practice-dpc-t');
-        const startDpcOBtn = document.getElementById('start-practice-dpc-o');
-        const startDpcSBtn = document.getElementById('start-practice-dpc-s');
-        const startDpcZBtn = document.getElementById('start-practice-dpc-z');
-        const startDpcIBtn = document.getElementById('start-practice-dpc-i');
-        const startDpcJBtn = document.getElementById('start-practice-dpc-j');
-        const startDpcLBtn = document.getElementById('start-practice-dpc-l');
-        const startDpcLeftOszBtn = document.getElementById('start-practice-dpc-left-osz');
-
-        if (showPracticeBtn && practiceMenu && mainMenu && backToMainFromPracticeBtn) {
-            const newShow = showPracticeBtn.cloneNode(true);
-            showPracticeBtn.parentNode.replaceChild(newShow, showPracticeBtn);
-
-            const newBack = backToMainFromPracticeBtn.cloneNode(true);
-            backToMainFromPracticeBtn.parentNode.replaceChild(newBack, backToMainFromPracticeBtn);
-
-            newShow.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                mainMenu.style.display = 'none';
-                if (controlsGuide) controlsGuide.style.display = 'none';
-                practiceMenu.style.display = 'flex';
-                this.currentMenuContext = 'practice';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            newBack.addEventListener('click', () => {
-                this.sounds.playMenuClick();
-                practiceMenu.style.display = 'none';
-                mainMenu.style.display = 'flex';
-                if (controlsGuide) controlsGuide.style.display = 'block';
-                this.currentMenuContext = 'main';
-                this.currentMenuIndex = 0;
-                this.updateMenuItems();
-                this.updateMenuFocus();
-            });
-
-            if (startFreePracticeBtn) {
-                const newBtn = startFreePracticeBtn.cloneNode(true);
-                startFreePracticeBtn.parentNode.replaceChild(newBtn, startFreePracticeBtn);
+            // ゲームオーバー画面のボタン
+            const returnTitleGameoverBtn = document.getElementById('return-title-gameover-btn');
+            if (returnTitleGameoverBtn) {
+                const newBtn = returnTitleGameoverBtn.cloneNode(true);
+                returnTitleGameoverBtn.parentNode.replaceChild(newBtn, returnTitleGameoverBtn);
                 newBtn.addEventListener('click', () => {
-                    this.sounds.playMenuClick();
-                    practiceMenu.style.display = 'none';
-                    this.start('practice');
+                    try {
+                        this.sounds.playMenuClick();
+                    } catch (e) {
+                        console.error('Sound play failed:', e);
+                    }
+                    const optPanel = document.getElementById('practice-info-panel');
+                    if (optPanel) optPanel.style.display = 'none';
+                    this.menuNavigationEnabled = true;
+                    this.returnToTitle();
                 });
             }
 
-            if (openDpcMenuBtn && dpcMenu && backToPracticeFromDpcBtn) {
-                const newOpen = openDpcMenuBtn.cloneNode(true);
-                openDpcMenuBtn.parentNode.replaceChild(newOpen, openDpcMenuBtn);
+            bindButton('restart-btn', () => this.quickReset());
+            bindButton('share-x-btn', () => this.shareToX());
 
-                const newDpcBack = backToPracticeFromDpcBtn.cloneNode(true);
-                backToPracticeFromDpcBtn.parentNode.replaceChild(newDpcBack, backToPracticeFromDpcBtn);
+            // 設定ボタン
+            const openSettings = () => {
+                this.loadKeyBindingsToUI();
+                this.loadGameSettingsToUI();
+                document.getElementById('settings-modal').classList.add('active');
 
-                newOpen.addEventListener('click', () => {
+                // オンライン対戦時はポーズをかけない
+                const isOnline = this.p2 && this.p2.isOnlineRemote;
+                if (isOnline) return;
+
+                // 対戦中の場合は両インスタンスを一時停止
+                if (this.p1 && this.p2) {
+                    if (!this.p1.isPaused) this.p1.pause(true);
+                    if (!this.p2.isPaused) this.p2.pause(true);
+                }
+                this.isPaused = true;
+            };
+            bindButton('settings-btn', openSettings);
+            bindButton('vs-settings-btn', openSettings);
+
+            // e-sportsメニュー制御
+            const showEsportsBtn = document.getElementById('show-esports-menu');
+            const esportsMenu = document.getElementById('esports-mode-select');
+            const backToMainFromEsportsBtn = document.getElementById('back-to-main-from-esports');
+
+            // メインメニューの定義（共通で使用）
+            const mainMenu = document.getElementById('main-mode-select');
+            const controlsGuide = document.querySelector('.controls-guide');
+
+            if (showEsportsBtn && esportsMenu && mainMenu && backToMainFromEsportsBtn) {
+                const newShow = showEsportsBtn.cloneNode(true);
+                showEsportsBtn.parentNode.replaceChild(newShow, showEsportsBtn);
+
+                const newBack = backToMainFromEsportsBtn.cloneNode(true);
+                backToMainFromEsportsBtn.parentNode.replaceChild(newBack, backToMainFromEsportsBtn);
+
+                newShow.addEventListener('click', () => {
                     this.sounds.playMenuClick();
-                    practiceMenu.style.display = 'none';
-                    dpcMenu.style.display = 'grid';
-                    this.currentMenuContext = 'dpc-menu';
+                    mainMenu.style.display = 'none';
+                    if (controlsGuide) controlsGuide.style.display = 'none';
+                    esportsMenu.style.display = 'flex'; // gridではなくflexで縦並び
+                    this.currentMenuContext = 'esports';
                     this.currentMenuIndex = 0;
                     this.updateMenuItems();
                     this.updateMenuFocus();
                 });
 
-                newDpcBack.addEventListener('click', () => {
+                newBack.addEventListener('click', () => {
                     this.sounds.playMenuClick();
-                    dpcMenu.style.display = 'none';
+                    esportsMenu.style.display = 'none';
+                    mainMenu.style.display = 'flex';
+                    if (controlsGuide) controlsGuide.style.display = 'block';
+                    this.currentMenuContext = 'main';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+            }
+
+            // Sprintメニュー制御
+            const showSprintBtn = document.getElementById('show-sprint-menu');
+            const sprintMenu = document.getElementById('sprint-mode-select');
+            const backToEsportsFromSprintBtn = document.getElementById('back-to-esports-from-sprint');
+
+            if (showSprintBtn && sprintMenu && esportsMenu && backToEsportsFromSprintBtn) {
+                const newShow = showSprintBtn.cloneNode(true);
+                showSprintBtn.parentNode.replaceChild(newShow, showSprintBtn);
+
+                const newBack = backToEsportsFromSprintBtn.cloneNode(true);
+                backToEsportsFromSprintBtn.parentNode.replaceChild(newBack, backToEsportsFromSprintBtn);
+
+                // 全国ランキングボタン
+                if (this.showNationalRankingBtn && this.showNationalRankingBtn.parentNode) {
+                    const newBtn = this.showNationalRankingBtn.cloneNode(true);
+                    this.showNationalRankingBtn.parentNode.replaceChild(newBtn, this.showNationalRankingBtn);
+                    this.showNationalRankingBtn = newBtn;
+                    this.showNationalRankingBtn.addEventListener('click', () => {
+                        this.sounds.playMenuClick();
+                        if (this.rankingModal) {
+                            // ゲーム中ならポーズする
+                            if (this.isRunning && !this.isPaused) {
+                                this.pause();
+                            }
+                            this.rankingModal.classList.add('active');
+                            // デフォルトで40ラインを表示
+                            const rankingTabsContainer = document.getElementById('ranking-tabs');
+                            if (rankingTabsContainer) {
+                                const tabBtns = rankingTabsContainer.querySelectorAll('.tab-btn');
+                                tabBtns.forEach(b => b.classList.remove('active'));
+                                const defaultTab = rankingTabsContainer.querySelector('[data-ranking-mode="40lines"]');
+                                if (defaultTab) defaultTab.classList.add('active');
+                            }
+                            this.fetchRankingFromSupabase('40lines');
+
+                            // キー入力対応
+                            this.currentMenuContext = 'ranking';
+                            this.currentMenuIndex = 1; // 40ラインタブ (DOM内ではclose-rankingが0番目、タブが1～6番目)
+                            this.updateMenuItems();
+                            this.updateMenuFocus();
+                        }
+                    });
+                }
+
+                // ランキングタブの制御
+                const rankingTabsContainer = document.getElementById('ranking-tabs');
+                if (rankingTabsContainer) {
+                    const tabBtns = rankingTabsContainer.querySelectorAll('.tab-btn');
+                    tabBtns.forEach(btn => {
+                        const newTab = btn.cloneNode(true);
+                        btn.parentNode.replaceChild(newTab, btn);
+                        newTab.addEventListener('click', () => {
+                            this.sounds.playMenuClick();
+                            // 再取得
+                            const updatedTabBtns = rankingTabsContainer.querySelectorAll('.tab-btn');
+                            updatedTabBtns.forEach(b => b.classList.remove('active'));
+                            newTab.classList.add('active');
+                            const mode = newTab.getAttribute('data-ranking-mode');
+                            this.fetchRankingFromSupabase(mode);
+                        });
+                    });
+                }
+
+                newShow.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    esportsMenu.style.display = 'none';
+                    sprintMenu.style.display = 'flex';
+                    this.currentMenuContext = 'sprint';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+                newBack.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    sprintMenu.style.display = 'none';
+                    esportsMenu.style.display = 'flex';
+                    this.currentMenuContext = 'esports';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+
+                // ランキングモーダル閉じる
+                const closeRankingAction = () => {
+                    this.sounds.playMenuClick();
+                    if (this.rankingModal) {
+                        this.rankingModal.classList.remove('active');
+                    }
+                    // esportsメニューに戻す
+                    this.currentMenuContext = 'esports';
+                    this.currentMenuIndex = 3; // 全国ランキングボタン
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                };
+
+                if (this.closeRankingBtn) {
+                    this.closeRankingBtn.addEventListener('click', closeRankingAction);
+                }
+
+                if (this.rankingModal) {
+                    this.rankingModal.addEventListener('click', (e) => {
+                        if (e.target === this.rankingModal) {
+                            closeRankingAction();
+                        }
+                    });
+                }
+            }
+            const showSurvivalBtn = document.getElementById('show-survival-menu');
+            const survivalMenu = document.getElementById('survival-mode-select');
+            const backToMainBtn = document.getElementById('back-to-main');
+
+            if (showSurvivalBtn && survivalMenu && mainMenu && backToMainBtn) {
+                const newShow = showSurvivalBtn.cloneNode(true);
+                showSurvivalBtn.parentNode.replaceChild(newShow, showSurvivalBtn);
+
+                const newBack = backToMainBtn.cloneNode(true);
+                backToMainBtn.parentNode.replaceChild(newBack, backToMainBtn);
+
+                newShow.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    // サバイバルは e-sports メニューから遷移するようになった
+                    if (esportsMenu) esportsMenu.style.display = 'none';
+                    else mainMenu.style.display = 'none'; // フォールバック
+
+                    if (controlsGuide) controlsGuide.style.display = 'none';
+
+                    survivalMenu.style.display = 'flex';
+                    this.currentMenuContext = 'survival';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+                newBack.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    survivalMenu.style.display = 'none';
+                    // サバイバルからは e-sports メニューに戻る
+                    if (esportsMenu) esportsMenu.style.display = 'flex';
+                    else mainMenu.style.display = 'flex';
+
+                    this.currentMenuContext = 'esports'; // ここも e-sports に戻す
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+            }
+
+            // Versus Mode Setup Menu Control
+            const showVersusSetupBtn = document.getElementById('show-versus-setup');
+            const versusSetupMenu = document.getElementById('versus-setup-menu');
+            const startVersusMatchBtn = document.getElementById('start-versus-match');
+            const backToMainFromVersusBtn = document.getElementById('back-to-main-from-versus');
+            const cpuLevelSlider = document.getElementById('cpu-level-slider');
+            const cpuLevelDisplay = document.getElementById('cpu-level-display');
+
+            if (showVersusSetupBtn && versusSetupMenu && mainMenu && startVersusMatchBtn && backToMainFromVersusBtn) {
+                // クローンしてリスナー重複排除
+                const newShow = showVersusSetupBtn.cloneNode(true);
+                showVersusSetupBtn.parentNode.replaceChild(newShow, showVersusSetupBtn);
+
+                const newStart = startVersusMatchBtn.cloneNode(true);
+                startVersusMatchBtn.parentNode.replaceChild(newStart, startVersusMatchBtn);
+
+                const newBack = backToMainFromVersusBtn.cloneNode(true);
+                backToMainFromVersusBtn.parentNode.replaceChild(newBack, backToMainFromVersusBtn);
+
+                // Versus Type Radio Buttons
+                const radioButtons = document.querySelectorAll('input[name="versus-type"]');
+                const cpuSettingsContainer = document.getElementById('cpu-settings-container');
+                const onlineSettingsContainer = document.getElementById('online-settings-container');
+
+                const updateVersusUI = () => {
+                    const type = document.querySelector('input[name="versus-type"]:checked')?.value;
+                    if (type === 'online') {
+                        if (cpuSettingsContainer) cpuSettingsContainer.style.display = 'none';
+                        if (onlineSettingsContainer) onlineSettingsContainer.style.display = 'flex';
+                        if (newStart) newStart.textContent = "ルーム入室・作成";
+                    } else {
+                        if (cpuSettingsContainer) cpuSettingsContainer.style.display = 'flex';
+                        if (onlineSettingsContainer) onlineSettingsContainer.style.display = 'none';
+                        if (newStart) newStart.textContent = "試合開始";
+                    }
+                };
+
+                radioButtons.forEach(rb => {
+                    rb.addEventListener('change', updateVersusUI);
+                });
+
+                newShow.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    mainMenu.style.display = 'none';
+                    if (controlsGuide) controlsGuide.style.display = 'none';
+                    versusSetupMenu.style.display = 'flex';
+                    this.currentMenuContext = 'versus-setup';
+                    this.currentMenuIndex = 0;
+
+                    // 保存されたCPUレベルをUIに反映
+                    const savedCpuLevel = this.settings.get('cpuLevel') || 1;
+                    if (cpuLevelSlider) cpuLevelSlider.value = savedCpuLevel;
+                    if (cpuLevelDisplay) cpuLevelDisplay.textContent = savedCpuLevel;
+
+                    updateVersusUI(); // Initialize UI state
+
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+                newStart.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+
+                    const versusType = document.querySelector('input[name="versus-type"]:checked')?.value;
+                    if (versusType === 'online') {
+                        const roomId = document.getElementById('room-id-input')?.value;
+                        if (roomId && window.networkManager) {
+                            window.networkManager.joinRoom(roomId);
+                        } else {
+                            alert("ルームIDを入力してください");
+                        }
+                    } else {
+                        versusSetupMenu.style.display = 'none';
+                        this.toggleVersusMode(true);
+                    }
+                });
+
+                const createRoomBtn = document.getElementById('create-room-btn');
+                if (createRoomBtn) {
+                    createRoomBtn.addEventListener('click', () => {
+                        this.sounds.playMenuClick();
+                        const roomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+                        document.getElementById('room-id-input').value = roomId;
+                        if (window.networkManager) {
+                            window.networkManager.joinRoom(roomId);
+                        }
+                    });
+                }
+
+                // Lobby Buttons
+                bindButton('lobby-ready-btn', () => {
+                    if (window.networkManager) window.networkManager.toggleReady();
+                });
+
+                bindButton('copy-invite-link-btn', () => {
+                    if (!window.networkManager || !window.networkManager.currentRoomId) return;
+                    const roomId = window.networkManager.currentRoomId;
+                    const url = new URL(window.location.href);
+                    url.searchParams.set('room', roomId);
+
+                    navigator.clipboard.writeText(url.toString()).then(() => {
+                        const btn = document.getElementById('copy-invite-link-btn');
+                        const originalText = btn.textContent;
+                        btn.textContent = 'コピー完了！';
+                        btn.style.color = '#00ff41';
+                        btn.style.borderColor = '#00ff41';
+                        setTimeout(() => {
+                            btn.textContent = originalText;
+                            btn.style.color = '#00f0ff';
+                            btn.style.borderColor = '#00f0ff';
+                        }, 2000);
+                    }).catch(err => {
+                        console.error('Failed to copy text: ', err);
+                    });
+                });
+                bindButton('lobby-start-btn', () => {
+                    if (window.networkManager) window.networkManager.requestStart();
+                });
+                bindButton('lobby-back-btn', () => {
+                    if (window.networkManager) window.networkManager.leaveRoom();
+                    document.getElementById('online-lobby-menu').style.display = 'none';
+                    document.getElementById('versus-setup-menu').style.display = 'flex';
+                    this.currentMenuContext = 'versus-setup';
+                    this.updateMenuItems();
+                });
+
+                const lobbyWinSetsInput = document.getElementById('lobby-win-sets-input');
+                if (lobbyWinSetsInput) {
+                    lobbyWinSetsInput.addEventListener('change', (e) => {
+                        if (this.isOnlineHost() && window.networkManager) {
+                            window.networkManager.updateSettings({ winningSets: parseInt(e.target.value) });
+                        }
+                    });
+                }
+
+                newBack.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    versusSetupMenu.style.display = 'none';
+                    mainMenu.style.display = 'flex';
+                    if (controlsGuide) controlsGuide.style.display = 'block';
+                    this.currentMenuContext = 'main';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+                if (cpuLevelSlider && cpuLevelDisplay) {
+                    cpuLevelSlider.addEventListener('input', (e) => {
+                        const val = !!e.target ? e.target.value : cpuLevelSlider.value;
+                        cpuLevelDisplay.textContent = val;
+                        // 設定を即座に保存
+                        this.settings.set('cpuLevel', parseInt(val));
+                        this.settings.saveSettings();
+                    });
+                }
+            }
+
+            // Practice Mode Menu Control
+            const showPracticeBtn = document.getElementById('start-practice');
+            const practiceMenu = document.getElementById('practice-mode-select');
+            const backToMainFromPracticeBtn = document.getElementById('back-to-main-from-practice');
+            const startFreePracticeBtn = document.getElementById('start-practice-free');
+            const openDpcMenuBtn = document.getElementById('btn-open-dpc-menu');
+
+            // DPC Submenu elements
+            const dpcMenu = document.getElementById('dpc-mode-select');
+            const backToPracticeFromDpcBtn = document.getElementById('back-to-practice-from-dpc');
+            const startDpcTBtn = document.getElementById('start-practice-dpc-t');
+            const startDpcOBtn = document.getElementById('start-practice-dpc-o');
+            const startDpcSBtn = document.getElementById('start-practice-dpc-s');
+            const startDpcZBtn = document.getElementById('start-practice-dpc-z');
+            const startDpcIBtn = document.getElementById('start-practice-dpc-i');
+            const startDpcJBtn = document.getElementById('start-practice-dpc-j');
+            const startDpcLBtn = document.getElementById('start-practice-dpc-l');
+            const startDpcLeftOszBtn = document.getElementById('start-practice-dpc-left-osz');
+
+            if (showPracticeBtn && practiceMenu && mainMenu && backToMainFromPracticeBtn) {
+                const newShow = showPracticeBtn.cloneNode(true);
+                showPracticeBtn.parentNode.replaceChild(newShow, showPracticeBtn);
+
+                const newBack = backToMainFromPracticeBtn.cloneNode(true);
+                backToMainFromPracticeBtn.parentNode.replaceChild(newBack, backToMainFromPracticeBtn);
+
+                newShow.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    mainMenu.style.display = 'none';
+                    if (controlsGuide) controlsGuide.style.display = 'none';
                     practiceMenu.style.display = 'flex';
                     this.currentMenuContext = 'practice';
                     this.currentMenuIndex = 0;
                     this.updateMenuItems();
                     this.updateMenuFocus();
                 });
-            }
 
-            // DPC Buttons logic
-            const setupDpcBtn = (btn, type) => {
-                if (btn) {
-                    const newBtn = btn.cloneNode(true);
-                    btn.parentNode.replaceChild(newBtn, btn);
+                newBack.addEventListener('click', () => {
+                    this.sounds.playMenuClick();
+                    practiceMenu.style.display = 'none';
+                    mainMenu.style.display = 'flex';
+                    if (controlsGuide) controlsGuide.style.display = 'block';
+                    this.currentMenuContext = 'main';
+                    this.currentMenuIndex = 0;
+                    this.updateMenuItems();
+                    this.updateMenuFocus();
+                });
+
+                if (startFreePracticeBtn) {
+                    const newBtn = startFreePracticeBtn.cloneNode(true);
+                    startFreePracticeBtn.parentNode.replaceChild(newBtn, startFreePracticeBtn);
                     newBtn.addEventListener('click', () => {
                         this.sounds.playMenuClick();
-                        dpcMenu.style.display = 'none'; // Hide dpc submenu
-                        this.start('practice', type);
+                        practiceMenu.style.display = 'none';
+                        this.start('practice');
                     });
                 }
-            };
 
-            setupDpcBtn(startDpcTBtn, 'dpc-t');
-            setupDpcBtn(startDpcOBtn, 'dpc-o');
-            setupDpcBtn(startDpcSBtn, 'dpc-s');
-            setupDpcBtn(startDpcZBtn, 'dpc-z');
-            setupDpcBtn(startDpcIBtn, 'dpc-i');
-            setupDpcBtn(startDpcJBtn, 'dpc-j');
-            setupDpcBtn(startDpcLBtn, 'dpc-l');
-            setupDpcBtn(startDpcLeftOszBtn, 'dpc-left-osz');
+                if (openDpcMenuBtn && dpcMenu && backToPracticeFromDpcBtn) {
+                    const newOpen = openDpcMenuBtn.cloneNode(true);
+                    openDpcMenuBtn.parentNode.replaceChild(newOpen, openDpcMenuBtn);
+
+                    const newDpcBack = backToPracticeFromDpcBtn.cloneNode(true);
+                    backToPracticeFromDpcBtn.parentNode.replaceChild(newDpcBack, backToPracticeFromDpcBtn);
+
+                    newOpen.addEventListener('click', () => {
+                        this.sounds.playMenuClick();
+                        practiceMenu.style.display = 'none';
+                        dpcMenu.style.display = 'grid';
+                        this.currentMenuContext = 'dpc-menu';
+                        this.currentMenuIndex = 0;
+                        this.updateMenuItems();
+                        this.updateMenuFocus();
+                    });
+
+                    newDpcBack.addEventListener('click', () => {
+                        this.sounds.playMenuClick();
+                        dpcMenu.style.display = 'none';
+                        practiceMenu.style.display = 'flex';
+                        this.currentMenuContext = 'practice';
+                        this.currentMenuIndex = 0;
+                        this.updateMenuItems();
+                        this.updateMenuFocus();
+                    });
+                }
+
+                // DPC Buttons logic
+                const setupDpcBtn = (btn, type) => {
+                    if (btn) {
+                        const newBtn = btn.cloneNode(true);
+                        btn.parentNode.replaceChild(newBtn, btn);
+                        newBtn.addEventListener('click', () => {
+                            this.sounds.playMenuClick();
+                            dpcMenu.style.display = 'none'; // Hide dpc submenu
+                            this.start('practice', type);
+                        });
+                    }
+                };
+
+                setupDpcBtn(startDpcTBtn, 'dpc-t');
+                setupDpcBtn(startDpcOBtn, 'dpc-o');
+                setupDpcBtn(startDpcSBtn, 'dpc-s');
+                setupDpcBtn(startDpcZBtn, 'dpc-z');
+                setupDpcBtn(startDpcIBtn, 'dpc-i');
+                setupDpcBtn(startDpcJBtn, 'dpc-j');
+                setupDpcBtn(startDpcLBtn, 'dpc-l');
+                setupDpcBtn(startDpcLeftOszBtn, 'dpc-left-osz');
+            }
         }
 
 
@@ -4306,6 +5620,38 @@ class TetrisGame {
         this.gameOver = false;
     }
 
+    checkAutoJoin() {
+        const params = new URLSearchParams(window.location.search);
+        const autoRoomId = params.get('room');
+        if (autoRoomId && window.networkManager) {
+            console.log('Auto-joining room detected:', autoRoomId);
+
+            const attemptJoin = () => {
+                // UIの初期化
+                const mainMenu = document.getElementById('main-mode-select');
+                const setupMenu = document.getElementById('versus-setup-menu');
+                const onlineSettings = document.getElementById('online-settings-container');
+                const roomIdInput = document.getElementById('room-id-input');
+                const controlsGuide = document.querySelector('.controls-guide');
+
+                if (mainMenu) mainMenu.style.display = 'none';
+                if (setupMenu) setupMenu.style.display = 'block';
+                if (onlineSettings) onlineSettings.style.display = 'flex';
+                if (roomIdInput) roomIdInput.value = autoRoomId;
+                if (controlsGuide) controlsGuide.style.display = 'none';
+
+                const vsOnlineRadio = document.querySelector('input[name="versus-type"][value="online"]');
+                if (vsOnlineRadio) vsOnlineRadio.checked = true;
+
+                console.log('Requesting joinRoom...');
+                window.networkManager.joinRoom(autoRoomId);
+            };
+
+            // Socket.io の接続待ちとUI反映のために少し長めに待機
+            setTimeout(attemptJoin, 1000);
+        }
+    }
+
     // ========================================
     // タイトルに戻る処理
     // ========================================
@@ -4330,19 +5676,49 @@ class TetrisGame {
             if (!this.p1) {
                 // 設定とサウンドマネージャーは共有
                 this.p1 = new TetrisGame(this.settings, this.sounds, 'p1-');
+                this.p1.inputEnabled = true; // Force enable input for P1
             }
             // P2インスタンス作成 (CPU or 2P)
             if (!this.p2) {
                 this.p2 = new TetrisGame(this.settings, this.sounds, 'p2-');
             }
 
-            const versusType = document.querySelector('input[name="versus-type"]:checked')?.value || 'cpu';
+            // argument override or UI selection
+            const versusType = arguments.length > 1 ? arguments[1] : (document.querySelector('input[name="versus-type"]:checked')?.value || 'cpu');
+
             if (versusType === '2p') {
+                this.p1.gamepadIndex = 0;
+                this.p2.gamepadIndex = 1;
                 this.p2.inputEnabled = true;
                 this.p2.isCPU = false;
+                this.p2.isOnlineRemote = false;
+            } else if (versusType === 'online') {
+                this.p1.gamepadIndex = 0;
+                this.p2.gamepadIndex = null;
+                this.p2.inputEnabled = false; // Input from network
+                this.p2.isCPU = false;
+                this.p2.isOnlineRemote = true; // IMPORTANT: Disable local update loop
             } else {
+                this.p1.gamepadIndex = 0;
+                this.p2.gamepadIndex = null;
                 this.p2.inputEnabled = false; // CPUなので入力無効
                 this.p2.isCPU = true;
+                this.p2.isOnlineRemote = false;
+            }
+
+            // Update P2 Heading
+            const p2Heading = document.getElementById('p2-player-heading');
+            if (p2Heading) {
+                if (versusType === 'cpu') {
+                    const savedCpuLevel = this.settings.get('cpuLevel');
+                    const cpuLevelSlider = document.getElementById('cpu-level-slider');
+                    const cpuLevel = savedCpuLevel || (cpuLevelSlider ? parseInt(cpuLevelSlider.value) : 1);
+                    p2Heading.textContent = `CPU (Lv.${cpuLevel})`;
+                } else if (versusType === 'online') {
+                    p2Heading.textContent = 'PLAYER 2 (ONLINE)';
+                } else {
+                    p2Heading.textContent = 'PLAYER 2';
+                }
             }
 
             // CPUのレベルを設定 (保存された設定を優先、なければスライダーから取得)
@@ -4350,6 +5726,12 @@ class TetrisGame {
             const cpuLevelSlider = document.getElementById('cpu-level-slider');
             const cpuLevel = savedCpuLevel || (cpuLevelSlider ? parseInt(cpuLevelSlider.value) : 1);
             this.p2.level = Math.max(1, Math.min(10, cpuLevel));
+
+            // UI Adjustments for Online Mode
+            const vsPauseBtn = document.getElementById('vs-pause-btn');
+            const vsResetBtn = document.getElementById('vs-quick-reset-btn');
+            if (vsPauseBtn) vsPauseBtn.style.display = (versusType === 'online') ? 'none' : 'block';
+            if (vsResetBtn) vsResetBtn.style.display = (versusType === 'online') ? 'none' : 'block';
 
 
             // 対戦リンク
@@ -4378,6 +5760,30 @@ class TetrisGame {
                     const cpuLevelSlider = document.getElementById('cpu-level-slider');
                     const cpuLevel = cpuLevelSlider ? parseInt(cpuLevelSlider.value) : 1;
 
+                    if (versusType === 'online') {
+                        window.networkManager.requestRestart();
+                        const statusEl = document.getElementById('p1-vs-status-message');
+                        if (statusEl) {
+                            statusEl.textContent = '対戦相手の選択を待っています...';
+                            statusEl.style.color = 'var(--accent-primary)';
+                        }
+                        // Disable menu navigation to "lock" inputs
+                        this.menuNavigationEnabled = false;
+
+                        // Disable buttons to prevent multiple requests
+                        if (newRestart) {
+                            newRestart.disabled = true;
+                            newRestart.style.opacity = '0.5';
+                            newRestart.classList.remove('menu-focused');
+                        }
+                        if (newBack) {
+                            newBack.disabled = true;
+                            newBack.style.opacity = '0.5';
+                            newBack.classList.remove('menu-focused');
+                        }
+                        return;
+                    }
+
                     this.p2.inputEnabled = (versusType === '2p');
                     this.p2.isCPU = (versusType === 'cpu');
 
@@ -4391,14 +5797,23 @@ class TetrisGame {
                 newBack.addEventListener('click', () => {
                     if (this.uiClickLocked) return;
                     this.sounds.playMenuClick();
+
+                    const versusType = document.querySelector('input[name="versus-type"]:checked')?.value || 'cpu';
+                    if (versusType === 'online') {
+                        window.networkManager.backToLobby();
+                        return;
+                    }
+
                     // タイトルに戻る
                     this.toggleVersusMode(false);
                 });
             }
 
-            // 対戦開始
-            this.p1.start('versus');
-            this.p2.start('versus', 'normal', cpuLevel);
+            // 対戦開始 (オンライン以外のみ即時開始)
+            if (versusType !== 'online') {
+                this.p1.start('versus');
+                this.p2.start('versus', 'normal', cpuLevel);
+            }
 
         } else {
             // 誤操作防止ロック
@@ -4407,12 +5822,45 @@ class TetrisGame {
 
             if (versusModeContainer) versusModeContainer.style.display = 'none';
 
+            // オーバーレイを非表示
+            const p1GameOver = document.getElementById('p1-game-over-overlay');
+            const p2GameOver = document.getElementById('p2-game-over-overlay');
+            if (p1GameOver) p1GameOver.classList.remove('active');
+            if (p2GameOver) p2GameOver.classList.remove('active');
+
+            // ボタンの状態をリセット
+            const restartBtn = document.getElementById('p1-restart-btn');
+            const backBtn = document.getElementById('p1-back-btn');
+            if (restartBtn) {
+                restartBtn.disabled = false;
+                restartBtn.style.opacity = '1';
+            }
+            if (backBtn) {
+                backBtn.disabled = false;
+                backBtn.style.opacity = '1';
+            }
+
+            // ステータスメッセージをクリア
+            const p1Status = document.getElementById('p1-vs-status-message');
+            const p2Status = document.getElementById('p2-vs-status-message');
+            if (p1Status) p1Status.textContent = '';
+            if (p2Status) p2Status.textContent = '';
+
             // メインメニューの各セクションを初期状態に戻す
             const mainMenu = document.getElementById('main-mode-select');
             const survivalMenu = document.getElementById('survival-mode-select');
             const versusSetupMenu = document.getElementById('versus-setup-menu');
+            const onlineLobbyMenu = document.getElementById('online-lobby-menu');
 
-            if (mainMenu) mainMenu.style.display = 'flex';
+            if (window.networkManager && window.networkManager.currentRoomId) {
+                if (onlineLobbyMenu) onlineLobbyMenu.style.display = 'flex';
+                if (mainMenu) mainMenu.style.display = 'none';
+                this.currentMenuContext = 'online-lobby';
+            } else {
+                if (mainMenu) mainMenu.style.display = 'flex';
+                this.currentMenuContext = 'main';
+            }
+
             if (survivalMenu) survivalMenu.style.display = 'none';
             if (versusSetupMenu) versusSetupMenu.style.display = 'none';
 
@@ -4697,10 +6145,10 @@ class TetrisGame {
         if (currentMaxHeight > 12 || isDefensiveMode) {
             const defensiveScores = {
                 0: 0,
-                1: 8.0,  // 防御時は1ライン消しでも高く評価
-                2: 15.0,
-                3: 20.0,
-                4: 45.0  // TETRIS!
+                1: 10.0, // 防御時は消去の価値を高める
+                2: 18.0,
+                3: 24.0,
+                4: 35.0  // TETRIS! (高所ではリスクを抑えるため少し下げる 45.0 -> 35.0)
             };
             lineScore = defensiveScores[completeLines] || 0;
 
@@ -4798,7 +6246,12 @@ class TetrisGame {
 
         // Penalize multiple wells (messy)
         if (deepWells > 1) {
-            wellScore -= (deepWells - 1) * 10.0; // Increased penalty for mess
+            wellScore -= (deepWells - 1) * 30.0; // ペナルティを大幅強化 (10.0 -> 30.0)
+        }
+
+        // 高所での待ちを抑制 (10段以上で溝がある場合は更なるペナルティ)
+        if (currentMaxHeight > 10 && deepWells > 0) {
+            wellScore -= 20.0;
         }
 
 
@@ -5393,6 +6846,12 @@ class TetrisGame {
         this.draw();
         this.showMessage('GARBAGE RECEIVED!', 'warning');
         this.updateScore(); // メーター更新
+
+        // Broadcast the board change immediately so the opponent sees the garbage rise
+        if (this.gameMode === 'versus' && window.networkManager && !this.isOnlineRemote) {
+            this.broadcastLock(); // This sends pieceLocked but effectively syncs the board
+        }
+
         if (!this.inputEnabled) this.aiState = 'idle';
     }
 
@@ -5659,10 +7118,13 @@ class TetrisGame {
         tabBtns.forEach(btn => {
             btn.addEventListener('click', () => {
                 const target = btn.dataset.target;
-                tabBtns.forEach(b => b.classList.remove('active'));
-                tabPanes.forEach(p => p.classList.remove('active'));
-                btn.classList.add('active');
-                document.getElementById(target).classList.add('active');
+                if (target) {
+                    tabBtns.forEach(b => b.classList.remove('active'));
+                    tabPanes.forEach(p => p.classList.remove('active'));
+                    btn.classList.add('active');
+                    const targetEl = document.getElementById(target);
+                    if (targetEl) targetEl.classList.add('active');
+                }
             });
         });
 
@@ -5801,8 +7263,9 @@ class TetrisGame {
         // 保存
         saveSettings.addEventListener('click', async () => {
             this.keyBindings.saveBindings();
-            if (this.p2) this.p2.keyBindings.saveBindings();
-            else {
+            if (this.p2) {
+                this.p2.keyBindings.saveBindings();
+            } else {
                 const p2 = new KeyBindings(2);
                 // 現在のUIからの反映が必要
                 const actions = ['moveLeft', 'moveRight', 'softDrop', 'hardDrop', 'rotateRight', 'rotateLeft', 'hold', 'hold2'];
@@ -5812,6 +7275,12 @@ class TetrisGame {
                 // 実際には startKeyListening が内部で keyBindings.setBinding を呼んでおり、
                 // loadKeyBindingsToUI で P2 用の KeyBindings(2) を使って表示している。
                 // 課題: 設定画面で P2 を保存するには、P2 用の KeyBindings オブジェクトを管理し続ける必要がある。
+            }
+
+            // プレイヤー名を保存
+            const nameInput = document.getElementById('setting-player-name');
+            if (nameInput) {
+                this.settings.set('playerName', nameInput.value || 'ななし');
             }
 
             // DAS/ARR設定を保存
@@ -5946,6 +7415,12 @@ class TetrisGame {
         document.getElementById('game-bgm-playlist-container').style.display = this.settings.get('bgmType') === 'custom' ? 'block' : 'none';
 
         this.renderPlaylist('bg');
+
+        // プレイヤー名を反映
+        const nameInput = document.getElementById('setting-player-name');
+        if (nameInput) {
+            nameInput.value = this.settings.get('playerName') || 'ななし';
+        }
 
         // Menu BGM filename (legacy but kept for simplicity)
         document.getElementById('menu-bgm-filename').textContent = this.settings.get('customMenuPlaylist')?.[0]?.name || '';
@@ -6421,6 +7896,199 @@ class TetrisGame {
         }
         return null; // Fail
     }
+
+    // ========================================
+    // 全国ランキング (Supabase)
+    // ========================================
+    // プレイヤー固有IDの取得 (ブラウザ単位で永続化)
+    getPlayerId() {
+        let id = localStorage.getItem('tetris_player_id');
+        if (!id) {
+            if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+                id = crypto.randomUUID();
+            } else {
+                // Fallback implementation
+                id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+                    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                    return v.toString(16);
+                });
+            }
+            localStorage.setItem('tetris_player_id', id);
+        }
+        return id;
+    }
+
+    async submitScoreToSupabase(mode, value) {
+        if (!window.supabaseClient) return;
+
+        const playerName = this.settings.get('playerName') || 'ななし';
+        const playerId = this.getPlayerId();
+        const roundedValue = Math.floor(value);
+
+        // モードごとの勝敗判定基準 (低い方が良いか高い方が良いか)
+        const isLowerBetter = (mode === '40lines' || mode === 't20');
+
+        try {
+            // 1. 既存の記録を確認 (player_id で検索)
+            const { data: existing, error: fetchError } = await window.supabaseClient
+                .from('ranking')
+                .select('*')
+                .eq('player_id', playerId)
+                .eq('game_mode', mode)
+                .maybeSingle();
+
+            if (fetchError) throw fetchError;
+
+            if (!existing) {
+                // 新規登録
+                const { error: insertError } = await window.supabaseClient
+                    .from('ranking')
+                    .insert([{
+                        player_id: playerId,
+                        player_name: playerName,
+                        game_mode: mode,
+                        time_ms: roundedValue,
+                        created_at: new Date().toISOString()
+                    }]);
+
+                if (insertError) throw insertError;
+
+                let modeLabel = mode;
+                if (mode === '40lines') modeLabel = '40ライン';
+                if (mode === 'marathon') modeLabel = 'マラソン';
+                if (mode === 't20') modeLabel = 'T20';
+                if (mode === 'ren4') modeLabel = '4列REN';
+                if (mode === 'survival_normal') modeLabel = '通常サバイバル';
+                if (mode === 'survival_serial') modeLabel = '課金穴サバイバル';
+
+                this.showMessage(`${modeLabel}ランキングに初登録されました！`, 'success');
+            } else {
+                const isBetter = isLowerBetter ? (roundedValue < existing.time_ms) : (roundedValue > existing.time_ms);
+
+                if (isBetter) {
+                    // 更新 (名前も最新のものに更新)
+                    const { error: updateError } = await window.supabaseClient
+                        .from('ranking')
+                        .update({
+                            time_ms: roundedValue,
+                            player_name: playerName,
+                            created_at: new Date().toISOString()
+                        })
+                        .eq('player_id', playerId)
+                        .eq('game_mode', mode);
+
+                    if (updateError) throw updateError;
+                    this.showMessage('自己ベスト更新！ランキングを更新しました！', 'success');
+                } else {
+                    console.log('Previous record was better. No update.');
+                }
+            }
+        } catch (error) {
+            console.error('Error submitting score:', error);
+        }
+    }
+
+    async fetchRankingFromSupabase(mode = '40lines') {
+        if (!window.supabaseClient) {
+            if (this.rankingListContainer) {
+                this.rankingListContainer.innerHTML = '<p style="text-align: center; color: #ff3d00;">Supabaseが初期化されていません</p>';
+            }
+            return;
+        }
+
+        if (this.rankingListContainer) {
+            this.rankingListContainer.innerHTML = '<p style="text-align: center; color: var(--text-muted); padding: 40px;">読み込み中...</p>';
+        }
+
+        try {
+            const isLowerBetter = (mode === '40lines' || mode === 't20');
+            const { data, error } = await window.supabaseClient
+                .from('ranking')
+                .select('*')
+                .eq('game_mode', mode)
+                .order('time_ms', { ascending: isLowerBetter })
+                .limit(100);
+
+            if (error) throw error;
+            this.renderRankingList(data, mode);
+        } catch (error) {
+            console.error('Error fetching ranking:', error);
+            if (this.rankingListContainer) {
+                this.rankingListContainer.innerHTML = '<p style="text-align: center; color: #ff3d00;">データの取得に失敗しました</p>';
+            }
+        }
+    }
+
+    renderRankingList(data, mode) {
+        if (!this.rankingListContainer) return;
+
+        if (!data || data.length === 0) {
+            this.rankingListContainer.innerHTML = `<p style="text-align: center; color: var(--text-muted); padding: 40px;">[${mode}] データがありません</p>`;
+            return;
+        }
+
+        // ラベルの決定
+        let valueLabel = 'タイム';
+        let titleLabel = '40ラインランキング';
+        if (mode === 'marathon') { valueLabel = 'スコア'; titleLabel = 'マラソンランキング'; }
+        if (mode === 't20') { titleLabel = 'T20スプリントランキング'; }
+        if (mode === 'ren4') { valueLabel = '最大REN'; titleLabel = '4列RENランキング'; }
+        if (mode === 'survival_normal') { valueLabel = '生存時間'; titleLabel = '通常サバイバルランキング'; }
+        if (mode === 'survival_serial') { valueLabel = '生存時間'; titleLabel = '課金穴サバイバルランキング'; }
+
+        // モーダルタイトルを更新
+        const modalTitle = document.querySelector('#ranking-modal .modal-title');
+        if (modalTitle) modalTitle.textContent = `🏆 全国${titleLabel}`;
+
+        let html = '<table class="ranking-table">';
+        html += `<thead><tr><th>順位</th><th>プレイヤー名</th><th>${valueLabel}</th><th>日付</th></tr></thead>`;
+        html += '<tbody>';
+
+        data.forEach((row, index) => {
+            const rank = index + 1;
+            let displayValue = '';
+
+            if (mode === '40lines' || mode === 't20') {
+                displayValue = this.formatTimeShort(row.time_ms);
+            } else if (mode === 'marathon') {
+                displayValue = row.time_ms.toLocaleString();
+            } else if (mode === 'ren4') {
+                displayValue = `${row.time_ms} REN`;
+            } else if (mode === 'survival_normal' || mode === 'survival_serial') {
+                displayValue = this.formatTime(row.time_ms);
+            }
+
+            const date = new Date(row.created_at).toLocaleDateString();
+
+            let rankClass = '';
+            if (rank === 1) rankClass = 'rank-gold';
+            else if (rank === 2) rankClass = 'rank-silver';
+            else if (rank === 3) rankClass = 'rank-bronze';
+
+            html += `<tr class="${rankClass}">
+                <td>${rank}</td>
+                <td>${this.escapeHTML(row.player_name)}</td>
+                <td style="font-family: monospace; font-weight: bold; color: var(--accent-primary);">${displayValue}</td>
+                <td style="font-size: 0.8rem; color: var(--text-muted);">${date}</td>
+            </tr>`;
+        });
+
+        html += '</tbody></table>';
+        this.rankingListContainer.innerHTML = html;
+    }
+
+    escapeHTML(str) {
+        if (!str) return '';
+        return str.replace(/[&<>"']/g, function (m) {
+            return {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#39;'
+            }[m];
+        });
+    }
 }
 
 // バトルマネージャー
@@ -6455,6 +8123,26 @@ async function initApp() {
     }, 100);
 
     window.game.updateMenuItems();
+
+    // 対戦モードのラジオボタンのchangeイベントリスナーを追加
+    const versusTypeRadios = document.querySelectorAll('input[name="versus-type"]');
+    const cpuSettingsContainer = document.getElementById('cpu-settings-container');
+
+    versusTypeRadios.forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            if (cpuSettingsContainer) {
+                if (e.target.value === 'cpu') {
+                    cpuSettingsContainer.style.display = 'flex';
+                } else {
+                    cpuSettingsContainer.style.display = 'none';
+                }
+                // メニューアイテムを更新
+                if (window.game) {
+                    window.game.updateMenuItems();
+                }
+            }
+        });
+    });
 
     window._tryStartBGM = function () {
         if (window.bgmStarted) return;

@@ -1,46 +1,37 @@
-# TETRIN 🎮
+# Online Tetris (Versus & Sprint)
 
-ブラウザで遊べるオリジナルテトリスゲーム  
-HOLDシステムと「5個のNEXT」を見通す戦略が特徴です
+Socket.IO を使用したリアルタイム対戦機能付きのテトリスゲームです。
+Render などの Node.js ホスティングサービスにデプロイして、インターネット経由で誰とでも遊ぶことができます。
 
-![TETRIN Gameplay](https://ユーザー名.github.io/TETRIN/assets/gameplay.gif) 
+## 特徴
 
----
+-   **オンライン対戦**: ルーム作成とURL共有による簡単マッチング。
+-   **VS 2P (ローカル)**: 1台のPCで2人対戦（ゲームパッド対応）。
+-   **豊富なモード**:
+    -   マラソン / 40ライン / T20スプリント
+    -   無限4列REN / サバイバル
+    -   VS CPU (レベル調整可能)
+-   **カスタマイズ**: 背景変更、キーコンフィグ、ゲームパッド感度調整。
 
-## 🌟 特徴 / Features
-- **4つのモード / 3 Game Modes**:
-  - **マラソン / Marathon**：長時間プレイでハイスコアを目指す
-  - **40ライン / 40 Lines**：40ライン消去までのタイムアタック
-  - **無限4列REN / 4-Column REN**：4列消しでRENを維持し続ける
-  - **サバイバル / 4-Column REN**：せり上がるお邪魔を掘り続ける
-- **シンプル操作 / Easy Controls**：すぐ遊べる設計
+## 遊び方 (オンライン対戦)
 
----
+1.  **サーバーの起動**:
+    ```bash
+    npm install
+    npm start
+    ```
+2.  **ブラウザでアクセス**: `http://localhost:3000` (またはデプロイされたURL)。
+3.  **ルーム作成**: 「対戦モード」→「Online」→「作成」を選択。
+4.  **招待**: 「招待リンクをコピー」して対戦相手に送ります。
+5.  **対戦開始**: 全員が「準備完了」になったらホストが「開始」を押します。
 
-## 🎮 操作方法 / Controls
-| 動作 / Action      | キー / Key |
-|-----------------|------------|
-| 移動 / Move       | ← →       |
-| 回転 / Rotate     | ↑         |
-| 下に落とす / Soft Drop | ↓     |
-| HOLD             | C         |
+## デプロイ方法
 
-ゲームパッド/JoyCon 対応可能！
-設定により背景、操作感度の調整可能！
----
+[Render.com](https://render.com/) で GitHub リポジトリと連携するだけで公開可能です。
+詳細は [deployment.md](./deployment.md) を参照してください。
 
-## 💻 プレイ方法 / How to Play
-ブラウザでこちらを開くだけで遊べます  
-[Play TETRIN](https://tetorin0305-sketch.github.io/TETRIN/)
+## 技術スタック
 
----
-
-## ⚠ 注意 / Notes
-- PCキーボード推奨 / Recommended on PC with keyboard  
-- スマホ非対応 / Not optimized for mobile devices
-
----
-
-## 📣 目標 / Goal
-戦略的に積んで高スコアやRENをつなげる楽しさを味わおう！  
-Experience the fun of strategic stacking and chaining RENs!
+-   **Frontend**: Vanilla HTML/JS, Canvas API, CSS
+-   **Backend**: Node.js, Express, Socket.IO
+-   **Database**: Supabase (ランキング用)

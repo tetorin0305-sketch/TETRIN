@@ -10,6 +10,15 @@
 <!DOCTYPE html>
 <html lang="ja">
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script>
+    const supabaseUrl = "https://ejrcavjlyqmsbgcngvog.supabase.co";
+    const supabaseKey = "sb_publishable_wazqXqOpejo3rLISNKF6gw_i9NMnmn9";
+    window.supabaseClient = supabase.createClient(supabaseUrl, supabaseKey);
+</script>
+
+
 <head>
 
     <meta charset="UTF-8">
@@ -138,14 +147,16 @@
                                         style="background: linear-gradient(135deg, #a000ff, #5500aa); box-shadow: 0 0 15px rgba(160, 0, 255, 0.4);">e-sports</button>
                                     <button class="btn-start btn-practice" id="start-practice">プラクティス</button>
                                     <button class="btn-start btn-versus" id="show-versus-setup"
-                                        style="background: linear-gradient(135deg, #ff0055, #ff5500); box-shadow: 0 0 15px rgba(255, 0, 85, 0.4);">対戦モード
-                                        (β)</button>
+                                        style="background: linear-gradient(135deg, #ff0055, #ff5500); box-shadow: 0 0 15px rgba(255, 0, 85, 0.4);">対戦モード</button>
                                 </div>
 
                                 <div class="mode-select" id="esports-mode-select" style="display: none;">
                                     <button class="btn-start" id="show-sprint-menu">SPRINT</button>
                                     <button class="btn-start btn-ren4" id="start-ren4">無限4列REN</button>
                                     <button class="btn-start btn-survival" id="show-survival-menu">サバイバル</button>
+                                    <button class="btn-start btn-ranking" id="show-national-ranking"
+                                        style="background: linear-gradient(135deg, #FFD700, #FFA500); color: #000; font-weight: 800; border: 1px solid #FFD700; box-shadow: 0 0 15px rgba(255, 215, 0, 0.4);">🏆
+                                        全国ランキング</button>
                                     <button class="btn-start btn-back" id="back-to-main-from-esports">戻る</button>
                                 </div>
 
@@ -167,6 +178,20 @@
                                             <input type="radio" name="versus-type" value="2p">
                                             <span>VS 2P</span>
                                         </label>
+                                        <label class="mode-option" id="vs-type-online">
+                                            <input type="radio" name="versus-type" value="online">
+                                            <span>Online</span>
+                                        </label>
+                                    </div>
+                                    <div id="online-settings-container"
+                                        style="display: none; width: 100%; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 20px;">
+                                        <div style="display: flex; gap: 5px; width: 80%;">
+                                            <input type="text" id="room-id-input" placeholder="Room ID"
+                                                style="padding: 10px; border-radius: 5px; border: none; flex-grow: 1; text-align: center;">
+                                            <button id="create-room-btn"
+                                                style="padding: 10px; border-radius: 5px; border: none; background: #00f0ff; color: #000; cursor: pointer; font-family: 'Orbitron', sans-serif; font-weight: bold; font-size: 0.8em;">作成</button>
+                                        </div>
+                                        <div id="connection-status" style="color: #aaa; font-size: 0.9em;"></div>
                                     </div>
                                     <div id="cpu-settings-container"
                                         style="margin-bottom: 20px; font-size: 1.1em; display: flex; flex-direction: column; align-items: center; gap: 15px; color: #fff; width: 100%;">
@@ -184,13 +209,46 @@
                                         </div>
                                     </div>
                                     <button class="btn-start" id="start-versus-match"
-                                        style="background: #00f0ff; color: #000; width: 80%;">試合開始</button>
+                                        style="background: #00f0ff; color: #000; width: 90%;">参加する</button>
                                     <button class="btn-start" id="back-to-main-from-versus"
                                         style="font-size: 0.8em; margin-top: 10px; width: 50%;">戻る</button>
+                                </div>
+
+                                <!-- NEW: Online Lobby Menu -->
+                                <div class="mode-select" id="online-lobby-menu" style="display: none;">
+                                    <h3 id="lobby-room-id"
+                                        style="color: #00f0ff; margin-bottom: 5px; font-family: 'Orbitron', sans-serif;">
+                                        ROOM: ----</h3>
+                                    <button id="copy-invite-link-btn" class="btn-start"
+                                        style="font-size: 0.7em; padding: 5px 10px; margin-bottom: 15px; background: rgba(0, 240, 255, 0.1); border: 1px solid #00f0ff; color: #00f0ff; width: auto; min-width: 150px;">招待リンクをコピー</button>
+                                    <div id="lobby-player-list"
+                                        style="width: 100%; margin: 20px 0; display: flex; flex-direction: column; gap: 10px;">
+                                        <!-- Players will be added here -->
+                                    </div>
+
+                                    <div id="lobby-settings-area"
+                                        style="margin-bottom: 20px; width: 80%; padding: 15px; border: 1px solid #333; border-radius: 12px; background: rgba(255,255,255,0.05);">
+                                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                                            <span style="font-size: 0.9em; font-family: 'Orbitron', sans-serif;">WIN
+                                                SETS</span>
+                                            <input type="number" id="lobby-win-sets-input" min="1" max="10" value="1"
+                                                style="width: 50px; background: #000; color: #ff0055; border: 1px solid #555; text-align: center; border-radius: 6px; font-family: 'Orbitron', sans-serif; font-weight: bold; padding: 5px;">
+                                        </div>
+                                    </div>
+
+                                    <button class="btn-start" id="lobby-ready-btn"
+                                        style="background: #ff0055; width: 80%;">準備完了</button>
+                                    <button class="btn-start" id="lobby-start-btn"
+                                        style="background: #00f0ff; color: #000; width: 80%; display: none;">試合開始</button>
+                                    <button class="btn-start" id="lobby-back-btn"
+                                        style="font-size: 0.8em; margin-top: 10px; width: 50%;">退出</button>
                                 </div>
                                 <!-- ... existing modes ... -->
                                 <div class="mode-select" id="survival-mode-select" style="display: none;">
                                     <!-- ... survival contents ... -->
+                                    <div style="font-size: 0.9em; color: #aaa; margin-bottom: 15px; margin-top: -10px;">
+                                        ※スコアはLevel 10スタート時のみ<br>記録されます
+                                    </div>
                                     <div class="level-selector">
                                         <label class="level-option">
                                             <input type="radio" name="survival-level" value="1" checked>
@@ -365,7 +423,12 @@
         <!-- ======================================== -->
         <!-- VERSUS MODE CONTAINER -->
         <!-- ======================================== -->
-        <div id="versus-mode-container" style="display: none;">
+        <div id="versus-mode-container" style="display: none; position: relative;">
+            <div id="versus-loading-overlay" class="loading-overlay" style="display: none;">
+                <div class="loading-text">
+                    <span class="loading-glow">NOW LOADING...</span>
+                </div>
+            </div>
             <div class="versus-main-area">
                 <!-- PLAYER 1 -->
                 <div class="versus-player-section" id="p1-section">
@@ -420,6 +483,7 @@
                                     <div class="overlay-content">
                                         <div class="new-record-badge" id="p1-new-record-badge">NEW RECORD</div>
                                         <h2 class="overlay-title game-over-title" id="p1-game-over-title">LOSE</h2>
+                                        <div class="vs-status-message" id="p1-vs-status-message"></div>
                                         <div class="game-over-buttons">
                                             <button class="btn-restart" id="p1-restart-btn">再戦</button>
                                             <button class="btn-restart" id="p1-back-btn">戻る</button>
@@ -462,6 +526,23 @@
                 <!-- VS DIVIDER -->
                 <div class="versus-divider">
                     <div class="vs-logo">VS</div>
+                    <div class="vs-score-board">
+                        <div class="vs-score-container">
+                            <div class="vs-score-item p1-score">
+                                <span class="player-label">P1</span>
+                                <span id="vs-p1-sets" class="score-number">0</span>
+                            </div>
+                            <div class="vs-score-separator">-</div>
+                            <div class="vs-score-item p2-score">
+                                <span id="vs-p2-sets" class="score-number">0</span>
+                                <span class="player-label">P2</span>
+                            </div>
+                        </div>
+                        <div class="vs-score-target">
+                            <span class="target-label">FIRST TO</span>
+                            <span id="vs-win-target" class="target-number">1</span>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- PLAYER 2 -->
@@ -498,7 +579,7 @@
 
                         <!-- Center -->
                         <div class="game-center">
-                            <h2 class="player-heading">PLAYER 2 (CPU)</h2>
+                            <h2 class="player-heading" id="p2-player-heading">PLAYER 2</h2>
                             <div class="board-container">
                                 <div class="garbage-meter">
                                     <div class="garbage-meter-fill" id="p2-garbage-meter-fill"></div>
@@ -517,6 +598,7 @@
                                     <div class="overlay-content">
                                         <div class="new-record-badge" id="p2-new-record-badge">NEW RECORD</div>
                                         <h2 class="overlay-title game-over-title" id="p2-game-over-title">LOSE</h2>
+                                        <div class="vs-status-message" id="p2-vs-status-message"></div>
                                     </div>
                                 </div>
                             </div>
@@ -577,6 +659,7 @@
                         <button class="tab-btn active" data-target="tab-controls">🎮 操作設定</button>
                         <button class="tab-btn" data-target="tab-practice">🎓 プラクティス</button>
                         <button class="tab-btn" data-target="tab-visuals">🖼️ 演出・サウンド</button>
+                        <button class="tab-btn" data-target="tab-profile">👤 プロフィール</button>
                     </div>
 
                     <!-- Tab: Controls -->
@@ -995,6 +1078,21 @@
                         </div>
                     </div>
 
+                    <!-- Tab: Profile -->
+                    <div id="tab-profile" class="tab-pane">
+                        <h3 class="settings-section-title">👤 プロフィール設定</h3>
+                        <div class="settings-grid">
+                            <div class="setting-item">
+                                <div class="setting-label-group">
+                                    <label for="setting-player-name">プレイヤー名:</label>
+                                    <span class="setting-hint">ランキングに表示される名前です (最大10文字)</span>
+                                </div>
+                                <input type="text" id="setting-player-name" maxlength="10" placeholder="ななし"
+                                    class="text-input">
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="keybind-message" id="keybind-message"></div>
                 </div>
                 <div class="modal-footer">
@@ -1007,6 +1105,32 @@
         </div>
     </div>
 
+    <!-- Ranking Modal -->
+    <div class="modal-overlay" id="ranking-modal">
+        <div class="modal-content ranking-modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">🏆 全国ランキング</h2>
+                <button class="modal-close btn-ranking-nav" id="close-ranking">×</button>
+            </div>
+            <!-- Ranking Mode Tabs -->
+            <div class="settings-tabs" id="ranking-tabs" style="margin-bottom: 20px;">
+                <button class="tab-btn btn-ranking-nav active" data-ranking-mode="40lines">40ライン</button>
+                <button class="tab-btn btn-ranking-nav" data-ranking-mode="marathon">マラソン</button>
+                <button class="tab-btn btn-ranking-nav" data-ranking-mode="t20">T20 Sprint</button>
+                <button class="tab-btn btn-ranking-nav" data-ranking-mode="ren4">4列REN</button>
+                <button class="tab-btn btn-ranking-nav" data-ranking-mode="survival_normal">通常サバイバル</button>
+                <button class="tab-btn btn-ranking-nav" data-ranking-mode="survival_serial">課金穴サバイバル</button>
+            </div>
+            <div class="modal-body">
+                <div id="ranking-list-container">
+                    <p style="text-align: center; color: var(--text-muted); padding: 40px;">読み込み中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="network.js"></script>
     <script src="game.js"></script>
 </body>
 

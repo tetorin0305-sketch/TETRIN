@@ -446,6 +446,16 @@ header {
     gap: 15px;
 }
 
+.vs-status-message {
+    font-family: var(--font-display);
+    font-size: 0.9rem;
+    color: var(--accent-success);
+    margin: 15px 0;
+    min-height: 1.2rem;
+    text-shadow: 0 0 10px rgba(6, 255, 165, 0.5);
+    font-weight: bold;
+}
+
 .overlay-title {
     font-family: var(--font-display);
     font-size: 2.6rem;
@@ -618,6 +628,21 @@ header {
     transform: scale(1.05);
 }
 
+.btn-ranking-nav.menu-focused {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: 0 0 15px rgba(255, 0, 110, 0.4);
+    transform: scale(1.05);
+    opacity: 1;
+}
+
+.modal-close.btn-ranking-nav.menu-focused {
+    background: rgba(255, 0, 110, 0.2);
+    color: var(--accent-primary);
+    transform: rotate(90deg) scale(1.1);
+}
+
 .mode-option {
     display: flex;
     align-items: center;
@@ -693,9 +718,9 @@ header {
 .btn-restart,
 .btn-control {
     font-family: var(--font-display);
-    font-size: 1.1rem;
+    font-size: 1rem;
     font-weight: 700;
-    padding: 15px 20px;
+    padding: 15px 15px;
     border: none;
     border-radius: 12px;
     cursor: pointer;
@@ -907,7 +932,8 @@ footer {
     align-items: center;
     gap: 20px;
     width: 100%;
-    min-width: 1200px;
+    min-width: 1250px;
+    /* Adjusted from 1320px to reduce outer empty space while keeping items safe */
     margin-top: 20px;
     padding-bottom: 50px;
     overflow-x: auto;
@@ -930,11 +956,11 @@ footer {
     display: flex;
     flex-direction: column;
     align-items: center;
-    width: 45%;
-    min-width: 500px;
+    width: auto;
+    min-width: 0;
     /* Prevent crushing */
     flex-shrink: 0;
-    /* Do not shrink below min-width */
+    /* Do not shrink below content width */
 }
 
 .player-heading {
@@ -957,16 +983,18 @@ footer {
     flex-direction: column;
     align-items: center;
     justify-content: flex-start;
-    padding-top: 150px;
-    gap: 20px;
-    width: 10%;
-    min-width: 80px;
+    padding-top: 20px;
+    gap: 12px;
+    width: 105px;
+    /* Adjusted from 60px to fit wider scoreboard */
+    min-width: 105px;
     z-index: 10;
+    flex-shrink: 0;
 }
 
 .vs-logo {
     font-family: var(--font-display);
-    font-size: 3rem;
+    font-size: 1.6rem;
     font-weight: 900;
     color: var(--accent-primary);
     text-shadow: 0 0 20px rgba(255, 0, 110, 0.6);
@@ -1419,7 +1447,7 @@ footer {
     gap: 15px;
     margin-bottom: 25px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    padding: 0 5px 5px 5px;
+    padding: 0 10px 5px 10px;
 }
 
 .tab-btn {
@@ -1527,6 +1555,7 @@ footer {
 .modal-body {
     padding: 0 30px 30px 30px;
     max-height: 60vh;
+    min-height: 400px;
     overflow-y: auto;
 }
 
@@ -2412,4 +2441,244 @@ footer {
 
 .playlist-items::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.2);
+}
+
+/* ========================================
+   ランキングテーブル (Supabase)
+   ======================================== */
+.ranking-modal-content {
+    width: 800px;
+    max-width: 90vw;
+    background: linear-gradient(135deg, rgba(15, 17, 30, 0.98), rgba(28, 32, 53, 0.98));
+    border: 2px solid rgba(255, 215, 0, 0.2);
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.8), 0 0 30px rgba(255, 215, 0, 0.1);
+}
+
+.ranking-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0 8px;
+    margin-top: 10px;
+}
+
+.ranking-table th {
+    text-align: left;
+    padding: 15px;
+    color: var(--text-muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    letter-spacing: 1px;
+    border-bottom: 2px solid rgba(255, 255, 255, 0.05);
+}
+
+.ranking-table td {
+    padding: 15px;
+    background: rgba(255, 255, 255, 0.03);
+    transition: all 0.2s ease;
+}
+
+.ranking-table tr:hover td {
+    background: rgba(255, 255, 255, 0.08);
+    transform: scale(1.01);
+}
+
+.ranking-table td:first-child {
+    border-radius: 8px 0 0 8px;
+    text-align: center;
+    font-weight: 900;
+    font-size: 1.2rem;
+    width: 80px;
+}
+
+.ranking-table td:last-child {
+    border-radius: 0 8px 8px 0;
+}
+
+.rank-gold td {
+    background: linear-gradient(90deg, rgba(255, 215, 0, 0.15), rgba(255, 215, 0, 0.05)) !important;
+}
+
+.rank-gold td:first-child {
+    color: #ffd700;
+    text-shadow: 0 0 10px rgba(255, 215, 0, 0.5);
+}
+
+.rank-silver td {
+    background: linear-gradient(90deg, rgba(192, 192, 192, 0.15), rgba(192, 192, 192, 0.05)) !important;
+}
+
+.rank-silver td:first-child {
+    color: #c0c0c0;
+    text-shadow: 0 0 10px rgba(192, 192, 192, 0.5);
+}
+
+.rank-bronze td {
+    background: linear-gradient(90deg, rgba(205, 127, 50, 0.15), rgba(205, 127, 50, 0.05)) !important;
+}
+
+.rank-bronze td:first-child {
+    color: #cd7f32;
+    text-shadow: 0 0 10px rgba(205, 127, 50, 0.5);
+}
+
+/* ========================================
+   LOADING OVERLAY
+   ======================================== */
+.loading-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.6);
+    z-index: 1000;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    pointer-events: none;
+}
+
+.loading-text {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: #fff;
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+}
+
+.loading-glow {
+    animation: loading-pulse 1.5s infinite ease-in-out;
+    text-shadow: 0 0 10px rgba(0, 240, 255, 0.8),
+        0 0 20px rgba(0, 240, 255, 0.4);
+}
+
+@keyframes loading-pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.5;
+        transform: scale(0.95);
+    }
+}
+
+/* ========================================
+   対戦中のスコア表示 (VS Score Board)
+   ======================================== */
+.vs-score-board {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 5px;
+    padding: 10px 8px;
+    background: rgba(10, 15, 30, 0.7);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+    animation: vsScoreAppear 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+    width: 100%;
+    max-width: 105px;
+    /* Adjusted to fit "FIRST TO" text */
+}
+
+.vs-score-container {
+    display: flex;
+    flex-direction: column;
+    /* Vertical stack for slimness */
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+}
+
+.vs-score-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    flex: 1;
+}
+
+.player-label {
+    font-family: var(--font-display);
+    font-size: 0.7rem;
+    font-weight: 700;
+    color: var(--text-muted);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.score-number {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    font-weight: 900;
+    line-height: 1;
+}
+
+#vs-p1-sets {
+    color: var(--accent-primary);
+    text-shadow: 0 0 15px rgba(255, 0, 110, 0.6),
+        0 0 40px rgba(255, 0, 110, 0.2);
+}
+
+#vs-p2-sets {
+    color: var(--accent-tertiary);
+    text-shadow: 0 0 15px rgba(58, 134, 255, 0.6),
+        0 0 40px rgba(58, 134, 255, 0.2);
+}
+
+.vs-score-separator {
+    display: none;
+    /* Hide separator in vertical layout to save space */
+}
+
+.vs-score-target {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 2px 5px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    margin-top: 4px;
+    width: 100%;
+}
+
+.target-label {
+    font-family: var(--font-display);
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 1.5px;
+    white-space: nowrap;
+}
+
+.target-number {
+    font-family: var(--font-display);
+    font-size: 0.85rem;
+    font-weight: 800;
+    color: var(--accent-success);
+    text-shadow: 0 0 12px rgba(6, 255, 165, 0.5);
+}
+
+@keyframes vsScoreAppear {
+    0% {
+        opacity: 0;
+        transform: scale(0.9) translateY(-20px);
+        filter: blur(15px);
+    }
+
+    100% {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+        filter: blur(0);
+    }
 }
