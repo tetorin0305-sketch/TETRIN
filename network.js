@@ -1,7 +1,11 @@
 
 class NetworkManager {
     constructor() {
-        this.socket = io();
+        // 開発環境(localhost)以外では Render サーバーに接続する
+        const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const serverUrl = isLocal ? undefined : 'https://tetrin.onrender.com';
+
+        this.socket = io(serverUrl);
         this.isHost = false; // Added to track host status
         this.initListeners();
     }
